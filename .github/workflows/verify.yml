@@ -37,7 +37,7 @@ jobs:
               --output-consumer machine --output-schema json "$f" > sim.json 2> sim.err
             rc=$?
             set -e
-            changes=$(jq -r '.ChangesRequired // .Simulation.ChangesRequired // "drift"' sim.json 2>/dev/null || echo error)
+            changes=$(jq -r '[.ChangesRequired, .Simulation.ChangesRequired, "drift"] | map(select(. != null)) | .[0]' sim.json 2>/dev/null || echo error)
             {
               echo "### \`$f\`: rc=$rc, ChangesRequired=$changes"
               echo '```json'
