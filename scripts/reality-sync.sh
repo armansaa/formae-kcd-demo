@@ -114,10 +114,19 @@ jq -n --arg obs "$OBS_ID" --slurpfile r "$OUT/resources.json" '{
   Decisions: [ $r[0][] | {ResourceID: .ResourceID, Action: "absorb"} ]
 }' > "$OUT/resolution.json"
 
-formae_m apply --mode reconcile --yes \
+formae_m apply --mode reconcile --simulate --yes \
   --resolution "$OUT/resolution.json" \
+  "$STACK_FILE" > "$OUT/review.json" \
+  || { echo "Review of the resolution failed:" >&2; cat "$OUT/review.json" >&2; finish error 1; }
+REVIEW_ID="$(jq -r '.Review.ReviewID // empty' "$OUT/review.json")"
+[[ -n "$REVIEW_ID" ]] || { echo "Review returned no ReviewID:" >&2; cat "$OUT/review.json" >&2; finish error 1; }
+jq --arg review "$REVIEW_ID" '. + {ReviewID: $review}' "$OUT/resolution.json" > "$OUT/resolution.final.json"
+
+formae_m apply --mode reconcile --yes \
+  --resolution "$OUT/resolution.final.json" \
   --message "reality-sync: absorb drift ${STACK} (${GITHUB_RUN_ID:-manual})" \
-  "$STACK_FILE" > "$OUT/apply.json"
+  "$STACK_FILE" > "$OUT/apply.json" \
+  || { echo "Apply with the resolution was rejected:" >&2; cat "$OUT/apply.json" >&2; finish error 1; }
 
 CMD_ID="$(jq -r '.CommandId // empty' "$OUT/apply.json")"
 [[ -n "$CMD_ID" ]] || { echo "Apply returned no CommandId:" >&2; cat "$OUT/apply.json" >&2; finish error 1; }
