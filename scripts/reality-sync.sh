@@ -7,8 +7,10 @@
 # Flow:
 #   1. simulate a soft reconcile of the stack file (machine output, JSON)
 #   2. no drift                    -> status=clean     (or code-differs if file != agent)
-#   3. drift, passes guardrails    -> absorb via --resolution, wait for the command,
-#                                     extract --desired into the file -> status=absorbed
+#   3. drift, passes guardrails    -> absorb via --resolution against the agent's desired state
+#                                     (not the Git file, which may lag behind an open PR),
+#                                     wait for the command, extract --desired into the file
+#                                     -> status=absorbed
 #   4. drift, hits a guardrail     -> touch nothing -> status=blocked
 #
 # Guardrails (there is no human approval, so these are the only brakes):
@@ -30,6 +32,8 @@ OUT="${RUNNER_TEMP:-/tmp}/reality-sync-${STACK}"
 mkdir -p "$OUT"
 SUMMARY="$OUT/summary.md"
 : > "$SUMMARY"
+rm -f "$OUT/original.pkl"
+trap '[[ ! -f "$OUT/original.pkl" ]] || cp "$OUT/original.pkl" "$STACK_FILE"' EXIT
 
 out() { echo "$1=$2" >> "${GITHUB_OUTPUT:-/dev/null}"; echo "::notice::$1=$2"; }
 finish() { out status "$1"; out summary "$SUMMARY"; exit "${2:-0}"; }
@@ -61,6 +65,18 @@ fi
 
 if ! jq -e '.data.ObservationID // empty' "$OUT/simulate.json" > /dev/null 2>&1; then
   echo "Simulate failed, and not because of drift:" >&2
+  cat "$OUT/simulate.json" "$OUT/simulate.err" >&2 || true
+  finish error 1
+fi
+
+cp "$STACK_FILE" "$OUT/original.pkl"
+formae extract --desired --yes --profile "$PROFILE" --query "stack:${STACK}" "$OUT/desired.pkl"
+cp "$OUT/desired.pkl" "$STACK_FILE"
+set +e
+formae_m apply --mode reconcile --simulate "$STACK_FILE" > "$OUT/simulate.json" 2> "$OUT/simulate.err"
+set -e
+if ! jq -e '.data.ObservationID // empty' "$OUT/simulate.json" > /dev/null 2>&1; then
+  echo "No drift observation against the agent's desired state:" >&2
   cat "$OUT/simulate.json" "$OUT/simulate.err" >&2 || true
   finish error 1
 fi
@@ -150,6 +166,7 @@ done
 # stops as an error: the agent has absorbed, Git has not. A human has to look at it.
 formae extract --desired --yes --profile "$PROFILE" --query "stack:${STACK}" "$OUT/extracted.pkl"
 cp "$OUT/extracted.pkl" "$STACK_FILE"
+rm -f "$OUT/original.pkl"
 
 {
   echo "## reality-sync: drift absorbed in \`$STACK\` (reality wins)"
