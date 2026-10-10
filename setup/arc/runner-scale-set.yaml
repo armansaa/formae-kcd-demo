@@ -1,18 +1,18 @@
-# Values untuk chart gha-runner-scale-set (ARC). Runner hidup di namespace arc-runners,
-# satu pod per job, dan dari sana menjangkau agent formae lewat Service ClusterIP.
+# Values for the gha-runner-scale-set chart (ARC). Runners live in the arc-runners namespace,
+# one pod per job, and reach the formae agent through its ClusterIP Service.
 #
 #   helm install formae-kcd \
 #     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
 #     -n arc-runners --create-namespace -f setup/arc/runner-scale-set.yaml
 githubConfigUrl: https://github.com/armansaa/formae-kcd-demo
-# Secret berisi kredensial GitHub App (lihat README langkah 5):
+# Secret holding the GitHub App credentials (see README step 5):
 githubConfigSecret: arc-github-app
 
-# Nama ini yang dipakai di `runs-on:` workflow.
+# This is the name used in the workflows' `runs-on:`.
 runnerScaleSetName: formae-kcd
 
-# 0 = pod runner baru dibuat per job (hemat). Untuk hari demo, set 1 supaya tidak menunggu
-# pod naik (~30-60 detik).
+# 0 = a fresh runner pod per job (cheap). On demo day set 1 so jobs don't wait for a pod to
+# start (~30-60 seconds).
 minRunners: 0
 maxRunners: 1
 

@@ -1,10 +1,9 @@
 # stacks/
 
-Satu file per stack formae. File di sini **dihasilkan** oleh
-`formae extract --desired --query 'stack:<nama>'`, bukan ditulis tangan: bot `reality-sync`
-menimpanya setiap kali drift diserap.
+One file per formae stack. These files are **generated**, not written by hand: the
+`reality-sync` bot overwrites them every time it absorbs drift.
 
-Isi awal (sekali, dari laptop yang terhubung ke agent):
+To regenerate one from a laptop connected to the agent:
 
 ```bash
 formae extract --desired --yes --profile gke-kcd \

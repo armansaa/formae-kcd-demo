@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
-# reality-sync.sh — serap drift satu stack (realitas menang), lalu tulis desired state ke file.
+# reality-sync.sh — absorb drift for one stack (reality wins), then write the desired state back to its file.
 #
-#   scripts/reality-sync.sh <file-stack> <nama-stack>
+#   scripts/reality-sync.sh <stack-file> <stack-name>
 #   scripts/reality-sync.sh stacks/kcd-demo-app.pkl kcd-demo-app
 #
-# Alur:
-#   1. simulate soft reconcile file stack (mode mesin, JSON)
-#   2. tidak ada drift            -> status=clean     (atau code-differs kalau file != agent)
-#   3. ada drift, lolos pagar      -> absorb lewat --resolution, tunggu command selesai,
-#                                     extract --desired ke file -> status=absorbed
-#   4. ada drift, kena pagar       -> tidak menyentuh apa pun -> status=blocked
+# Flow:
+#   1. simulate a soft reconcile of the stack file (machine output, JSON)
+#   2. no drift                    -> status=clean     (or code-differs if file != agent)
+#   3. drift, passes guardrails    -> absorb via --resolution, wait for the command,
+#                                     extract --desired into the file -> status=absorbed
+#   4. drift, hits a guardrail     -> touch nothing -> status=blocked
 #
-# Pagar (tanpa approval manusia, jadi ini satu-satunya rem):
-#   - hanya Operation "update" yang boleh diserap; delete/create => blocked
-#   - hanya tipe di ALLOWED_TYPES yang boleh diserap
-#   - satu resolusi wajib memutuskan SEMUA resource yang drift, jadi satu saja yang kena
-#     pagar membuat seluruh run berhenti (tidak ada absorb sebagian)
+# Guardrails (there is no human approval, so these are the only brakes):
+#   - only Operation "update" may be absorbed; delete/create => blocked
+#   - only types listed in ALLOWED_TYPES may be absorbed
+#   - one resolution must decide ALL drifted resources, so a single resource that hits a
+#     guardrail stops the whole run (no partial absorb)
 #
-# Output (ke $GITHUB_OUTPUT kalau ada): status, summary (path markdown), command_id
+# Outputs (to $GITHUB_OUTPUT when set): status, summary (markdown path), command_id
 set -euo pipefail
 
-STACK_FILE="${1:?pakai: reality-sync.sh <file-stack> <nama-stack>}"
-STACK="${2:?pakai: reality-sync.sh <file-stack> <nama-stack>}"
+STACK_FILE="${1:?usage: reality-sync.sh <stack-file> <stack-name>}"
+STACK="${2:?usage: reality-sync.sh <stack-file> <stack-name>}"
 PROFILE="${FORMAE_PROFILE:-ci}"
 ALLOWED_TYPES="${ALLOWED_TYPES:-K8S::Core::ConfigMap K8S::Apps::Deployment K8S::Batch::CronJob}"
 POLL_TIMEOUT="${POLL_TIMEOUT:-300}"
@@ -44,41 +44,41 @@ set -e
 if [[ $rc -eq 0 ]]; then
   changes="$(jq -r '.ChangesRequired // .Simulation.ChangesRequired // false' "$OUT/simulate.json")"
   if [[ "$changes" == "true" ]]; then
-    # Tidak ada drift, tapi file di Git berbeda dari desired state agent. Terjadi kalau PR
-    # reality-sync sebelumnya belum di-merge/ditutup, atau ada editan manusia di main.
-    # Bot TIDAK menerapkan perubahan kode; itu keputusan manusia.
+    # No drift, but the file in Git differs from the agent's desired state. Happens when a
+    # previous reality-sync PR is still open or was closed, or a human edited main.
+    # The bot NEVER applies code changes; that is a human decision.
     {
-      echo "### reality-sync: \`$STACK\` — file berbeda dari agent, tanpa drift"
+      echo "### reality-sync: \`$STACK\` — file differs from the agent, no drift"
       echo
-      echo "Tidak ada perubahan dari luar. File di \`main\` berbeda dari desired state agent"
-      echo "(PR reality-sync belum di-merge, atau ada editan kode). Bot tidak menerapkannya."
+      echo "Nothing changed outside formae. The file on \`main\` differs from the agent's desired"
+      echo "state (a reality-sync PR is not merged yet, or the code was edited). The bot does not apply it."
     } >> "$SUMMARY"
     finish code-differs
   fi
-  echo "### reality-sync: \`$STACK\` — bersih, tidak ada drift" >> "$SUMMARY"
+  echo "### reality-sync: \`$STACK\` — clean, no drift" >> "$SUMMARY"
   finish clean
 fi
 
 if ! jq -e '.data.ObservationID // empty' "$OUT/simulate.json" > /dev/null 2>&1; then
-  echo "Simulate gagal dan bukan karena drift:" >&2
+  echo "Simulate failed, and not because of drift:" >&2
   cat "$OUT/simulate.json" "$OUT/simulate.err" >&2 || true
   finish error 1
 fi
 
-# ---------- 2. baca drift + pagar ----------
+# ---------- 2. read drift + guardrails ----------
 OBS_ID="$(jq -r '.data.ObservationID' "$OUT/simulate.json")"
 jq -c '[.data.ModifiedStacks[]?.ModifiedResources[]?]' "$OUT/simulate.json" > "$OUT/resources.json"
 count="$(jq 'length' "$OUT/resources.json")"
-[[ "$count" -gt 0 ]] || { echo "ObservationID tanpa resource" >&2; finish error 1; }
+[[ "$count" -gt 0 ]] || { echo "ObservationID without resources" >&2; finish error 1; }
 
 blocked_reasons="$(jq -r --arg allowed "$ALLOWED_TYPES" '
   ($allowed | split(" ")) as $ok
   | .[] as $r
   | $r
   | if (.Operation | ascii_downcase) != "update" then
-      "- `\(.Type)` `\(.Label)`: operasi `\(.Operation)` (bukan update) — penghapusan/pembuatan dari luar tidak pernah diserap otomatis"
+      "- `\(.Type)` `\(.Label)`: operation `\(.Operation)` (not update) — out-of-band deletions/creations are never absorbed automatically"
     elif ($ok | index($r.Type)) == null then
-      "- `\(.Type)` `\(.Label)`: tipe tidak ada di allowlist"
+      "- `\(.Type)` `\(.Label)`: type is not in the allowlist"
     else empty end' "$OUT/resources.json")"
 
 render_changes() {
@@ -91,23 +91,23 @@ render_changes() {
 
 if [[ -n "$blocked_reasons" ]]; then
   {
-    echo "### reality-sync: \`$STACK\` — drift DIBLOKIR pagar, tidak ada yang diubah"
+    echo "### reality-sync: \`$STACK\` — drift BLOCKED by guardrails, nothing was changed"
     echo
     echo "ObservationID: \`$OBS_ID\`"
     echo
-    echo "Alasan:"
+    echo "Reasons:"
     echo "$blocked_reasons"
     echo
-    echo "Drift yang terlihat:"
+    echo "Observed drift:"
     render_changes
     echo
-    echo "Putuskan manual: absorb (realitas menang) atau revert (kode menang) dengan"
-    echo "\`formae apply --mode reconcile $STACK_FILE\` dari mesin yang terhubung ke agent."
+    echo "Decide manually: absorb (reality wins) or revert (code wins) with"
+    echo "\`formae apply --mode reconcile $STACK_FILE\` from a machine connected to the agent."
   } >> "$SUMMARY"
   finish blocked
 fi
 
-# ---------- 3. absorb lewat --resolution ----------
+# ---------- 3. absorb via --resolution ----------
 jq -n --arg obs "$OBS_ID" --slurpfile r "$OUT/resources.json" '{
   ObservationID: $obs,
   IdempotencyKey: ("reality-sync-" + $obs),
@@ -120,7 +120,7 @@ formae_m apply --mode reconcile --yes \
   "$STACK_FILE" > "$OUT/apply.json"
 
 CMD_ID="$(jq -r '.CommandId // empty' "$OUT/apply.json")"
-[[ -n "$CMD_ID" ]] || { echo "Apply tidak mengembalikan CommandId:" >&2; cat "$OUT/apply.json" >&2; finish error 1; }
+[[ -n "$CMD_ID" ]] || { echo "Apply returned no CommandId:" >&2; cat "$OUT/apply.json" >&2; finish error 1; }
 out command_id "$CMD_ID"
 
 deadline=$(( SECONDS + POLL_TIMEOUT ))
@@ -130,23 +130,23 @@ while (( SECONDS < deadline )); do
   state="$(jq -r '.Commands[0].State // empty' "$OUT/status.json")"
   case "$state" in
     Success) break ;;
-    Failed|Canceled|Cancelled) echo "Command $CMD_ID berakhir: $state" >&2; cat "$OUT/status.json" >&2; finish error 1 ;;
+    Failed|Canceled|Cancelled) echo "Command $CMD_ID ended: $state" >&2; cat "$OUT/status.json" >&2; finish error 1 ;;
   esac
   sleep 5
 done
-[[ "$state" == "Success" ]] || { echo "Timeout menunggu $CMD_ID (state=$state)" >&2; finish error 1; }
+[[ "$state" == "Success" ]] || { echo "Timed out waiting for $CMD_ID (state=$state)" >&2; finish error 1; }
 
-# ---------- 4. tulis balik desired state ke file ----------
-# Kalau extract gagal (mis. field di luar skema plugin, lihat temuan Cloud SQL), run berhenti
-# sebagai error: agent sudah menyerap, tapi Git belum. Itu harus dilihat manusia.
+# ---------- 4. write the desired state back to the file ----------
+# If extract fails (e.g. a field outside the plugin schema, see the Cloud SQL findings), the run
+# stops as an error: the agent has absorbed, Git has not. A human has to look at it.
 formae extract --desired --yes --profile "$PROFILE" --query "stack:${STACK}" "$OUT/extracted.pkl"
 cp "$OUT/extracted.pkl" "$STACK_FILE"
 
 {
-  echo "## reality-sync: drift diserap di \`$STACK\` (realitas menang)"
+  echo "## reality-sync: drift absorbed in \`$STACK\` (reality wins)"
   echo
-  echo "Perubahan berikut terjadi **di luar formae** (kubectl/console) dan sudah dicatat agent"
-  echo "sebagai desired intent. PR ini menyamakan Git dengan kenyataan."
+  echo "The changes below happened **outside formae** (kubectl/console) and the agent has"
+  echo "recorded them as desired intent. This PR brings Git in line with reality."
   echo
   render_changes
   echo
@@ -156,8 +156,8 @@ cp "$OUT/extracted.pkl" "$STACK_FILE"
   echo "| CommandId formae | \`$CMD_ID\` |"
   echo "| Run | ${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-} |"
   echo
-  echo "Tidak setuju? Tutup PR ini, lalu terapkan isi \`main\` secara manual dari mesin yang"
-  echo "terhubung ke agent: \`formae apply --mode reconcile $STACK_FILE\`. Karena drift sudah"
-  echo "diserap, formae akan menampilkannya sebagai perubahan kode biasa (kode menang)."
+  echo "Disagree? Close this PR, then apply \`main\` manually from a machine connected to the"
+  echo "agent: \`formae apply --mode reconcile $STACK_FILE\`. Because the drift was already"
+  echo "absorbed, formae shows it as an ordinary code change (code wins)."
 } >> "$SUMMARY"
 finish absorbed

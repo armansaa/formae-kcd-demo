@@ -1,136 +1,130 @@
-# formae-kcd-demo — reality-sync
+# formae-kcd-demo: reality-sync
 
-Demo untuk talk **"Beyond One-Way GitOps: Detecting and Reconciling Infrastructure Drift"**
+Demo for the talk **"Beyond One-Way GitOps: Detecting and Reconciling Infrastructure Drift"**
 (Kubernetes Cloud Native Days Indonesia 2026).
 
-GitOps biasa berjalan satu arah: Git → cluster. Saat insiden, orang tetap melakukan
-`kubectl edit` atau klik di console, dan Git diam-diam tertinggal. Repo ini menunjukkan arah
-sebaliknya dengan [formae](https://formae.io): **kenyataan → Git**. Perubahan dari luar
-dideteksi, diserap sebagai *desired intent*, lalu bot membuka PR yang menyamakan Git dengan
-kondisi cluster. Git berhenti jadi gerbang dan berubah jadi catatan kenyataan.
+GitOps normally flows one way: Git → cluster. During an incident people still `kubectl edit`,
+and Git silently falls behind. This repo uses [formae](https://formae.io) to run the other
+direction, **reality → Git**: out-of-band changes are detected, absorbed as desired state, and a
+bot opens a PR so Git matches the cluster again.
+
+## How it works
 
 ```
  kubectl / console                formae agent (GKE)               GitHub
  ─────────────────                ──────────────────               ──────
- ubah ConfigMap  ──────────────▶  sync tiap 10 menit
+ edit ConfigMap  ──────────────▶  sync every 10 minutes
                                   "drift: PROMO_ENABLED
                                    false → true"
                                          │
-                  reality-sync (tiap 10 menit, runner ARC di GKE)
+                  reality-sync (every 10 minutes, ARC runner in GKE)
                                          │
-                                  lolos pagar?
-                                   ├─ ya  → absorb (--resolution)
+                                  passes guardrails?
+                                   ├─ yes → absorb (--resolution)
                                    │        extract --desired ─────▶  PR "reality-sync: …"
-                                   │                                  check verify: Git = kenyataan
-                                   └─ tidak (delete/create, tipe di luar allowlist)
-                                            tidak mengubah apa pun ─▶  Issue "DIBLOKIR"
+                                   │                                  verify check: Git = reality
+                                   └─ no (delete/create, type outside the allowlist)
+                                            changes nothing ───────▶  Issue "BLOCKED"
 ```
 
-## Isi repo
-
-| Path | Isi |
-|---|---|
-| `stacks/*.pkl` | Satu file per stack, **dihasilkan** oleh `formae extract --desired`. Bot menimpanya |
-| `scripts/reality-sync.sh` | Deteksi drift → pagar → absorb → tulis balik. Bisa dijalankan manual |
-| `scripts/write-ci-profile.sh` | Profile CLI `ci` yang bicara ke Service agent di dalam cluster |
-| `.github/workflows/reality-sync.yml` | Jadwal tiap 10 menit + tombol manual. Buka PR atau Issue |
-| `.github/workflows/verify.yml` | Check di PR: simulate stack; PR bot wajib "tidak ada perubahan" |
-| `.github/workflows/build-runner-image.yml` | Image runner (actions-runner + formae + pkl + jq) ke GHCR |
-| `runner/Dockerfile` | Definisi image runner |
-| `setup/kcd-demo-namespace-rbac.yaml` | Namespace demo + izin tulis agent (disiapkan infra, bukan formae) |
-| `setup/arc/runner-scale-set.yaml` | Values ARC untuk runner scale set `formae-kcd` |
-
-## Pagar pengaman
-
-Tidak ada approval manusia sebelum drift diserap, jadi pagar ini satu-satunya rem:
-
-1. **Soft reconcile saja.** Tidak pernah `--force`, tidak pernah `--mode patch`.
-2. **Penghapusan/pembuatan dari luar tidak pernah diserap otomatis.** Resource yang hilang
-   bisa berarti masalah izin atau API, bukan keputusan manusia. Run berhenti dan membuka Issue.
-3. **Allowlist tipe**: `K8S::Core::ConfigMap`, `K8S::Apps::Deployment`, `K8S::Batch::CronJob`
-   (env `ALLOWED_TYPES`). Satu resource yang kena pagar menghentikan seluruh run; formae
-   mewajibkan satu resolusi memutuskan semua resource yang drift.
-4. **Bot tidak pernah menerapkan perubahan kode.** Kalau file di `main` berbeda dari agent
-   tanpa drift (mis. PR bot ditutup), run hanya mencatat `code-differs`.
-5. **Repo publik + runner self-hosted**: workflow PR tidak jalan untuk fork, dan setting repo
-   wajib *Require approval for all outside collaborators*.
-6. **Tanpa Secret Kubernetes** di stack demo. reality-sync menulis kondisi live ke Git.
-
-## Yang sudah diuji (formae 0.90.5, GKE 1.35)
-
-| Uji | Hasil |
-|---|---|
-| Discovery objek cluster lewat `GKEAuth` + Workload Identity | Objek di namespace sistem GKE terlihat sebagai `unmanaged` |
-| Deploy stack `kcd-demo-app` (ConfigMap + Deployment) | Berhasil, izin tulis hanya di `kcd-demo` |
-| `extract --desired` (E2) | Berhasil, dan hasilnya round-trip: di-apply balik = "No changes needed" |
-| G1: ConfigMap diubah via `kubectl` | Drift bersih: hanya dua key yang berubah |
-| Revert (kode menang) | ConfigMap kembali; hanya field yang dideklarasikan yang di-patch |
-| `rollout restart` (E3) | Annotation `restartedAt` tidak masuk desired state |
-
-Cloud SQL sengaja **tidak** dimasukkan ke loop ini: di plugin GCP 0.1.18,
-`GCP::SQL::DatabaseInstance` tidak mendukung update, dan extract setelah absorb gagal karena
-field di luar skema. Detail di talk.
-
-## Setup (sekali)
-
-Prasyarat: cluster `gke-research-lab` dengan agent formae 0.90.5 (Helm, Service
-`formae.formae.svc:49684`, basic auth), dan laptop yang sudah bisa
-`formae agent status --profile gke-kcd`.
-
-### 1. GitHub App untuk bot
-
-Settings → Developer settings → GitHub Apps → **New GitHub App**:
-
-- Nama: mis. `formae-reality-sync-armansaa` (harus unik di GitHub)
-- Homepage URL: URL repo ini
-- Webhook: **matikan** (Active tidak dicentang)
-- Repository permissions:
-  - Contents: **Read and write**
-  - Pull requests: **Read and write**
-  - Issues: **Read and write**
-  - Administration: **Read and write** (dipakai ARC untuk mendaftarkan runner)
-  - Metadata: Read (otomatis)
-- Where can this app be installed: **Only on this account**
-
-Setelah dibuat: catat **App ID**, klik *Generate a private key* (unduh `.pem`), lalu
-*Install App* → hanya repo `formae-kcd-demo`. **Installation ID** ada di URL halaman instalasi
-(`.../settings/installations/<ID>`).
-
-### 2. Isi stack awal, buat repo, push
+## Demo: a promo switched on without a PR
 
 ```bash
-cd ~/Documents/formae-kcd-demo
-formae extract --desired --yes --profile gke-kcd \
-  --query 'stack:kcd-demo-app' stacks/kcd-demo-app.pkl
-git init -b main && git add -A && git commit -m "formae-kcd-demo: reality-sync awal"
-gh repo create armansaa/formae-kcd-demo --public --source . --push
+kubectl -n kcd-demo patch configmap promo-config \
+  --type merge -p '{"data":{"PROMO_ENABLED":"true","DISCOUNT_PCT":"25"}}'
+kubectl -n kcd-demo rollout restart deploy/promo-api
 ```
 
-Push pertama ini juga menjalankan `build-runner-image`. Setelah selesai, buka
-Profile → Packages → `formae-kcd-runner` → Package settings → ubah visibilitas jadi
-**Public** supaya GKE bisa menarik image tanpa kredensial.
+Wait for the agent's sync (up to 10 minutes), then run the **reality-sync** workflow or wait for
+its schedule. It opens a PR `reality-sync: drift absorbed in kcd-demo-app` with a two-key diff in
+`stacks/kcd-demo-app.pkl` and a green `verify` check.
 
-### 3. Variable, secret, dan setting repo
+- **Merge** the PR: Git now matches reality.
+- **Close** the PR, then apply `main` yourself: code wins and the change is rolled back.
+  ```bash
+  formae apply --mode reconcile --profile gke-kcd stacks/kcd-demo-app.pkl
+  ```
 
-Settings → Secrets and variables → Actions:
+## Guardrails
 
-| Jenis | Nama | Isi |
-|---|---|---|
-| Variable | `APP_ID` | App ID dari langkah 1 |
-| Secret | `APP_PRIVATE_KEY` | Seluruh isi file `.pem` |
-| Secret | `FORMAE_USER` | Username basic auth agent (mis. `kcd`) |
-| Secret | `FORMAE_PASSWORD` | Password asli (bukan hash bcrypt) |
+Nobody approves drift before it is absorbed, so these rules are the only brakes:
 
-Settings → Actions → General → *Fork pull request workflows from outside collaborators* →
-**Require approval for all outside collaborators**.
+1. **Soft reconcile only.** Never `--force`, never `--mode patch`.
+2. **Deletions and creations are never absorbed.** A missing resource can be a permissions or
+   API problem, not a human decision. The run stops and opens an Issue.
+3. **Type allowlist** (env `ALLOWED_TYPES`): `K8S::Core::ConfigMap`, `K8S::Apps::Deployment`,
+   `K8S::Batch::CronJob`. One blocked resource stops the whole run, because formae takes a
+   single resolution for all drifted resources.
+4. **The bot never applies code.** If `main` differs from the agent without drift (for example
+   after a closed bot PR), the run only records `code-differs`.
+5. **No fork PRs on the self-hosted runner.** PR workflows don't run for forks, and *Require
+   approval for all outside collaborators* must be on.
+6. **No Kubernetes Secrets in the stack.** reality-sync writes live state into Git.
 
-### 4. Namespace demo (kalau belum)
+## Repo layout
+
+| Path | Contents |
+|---|---|
+| `stacks/*.pkl` | One file per stack, generated by `formae extract --desired`. The bot overwrites them |
+| `scripts/reality-sync.sh` | Detect drift → guardrails → absorb → write back. Also runs by hand |
+| `scripts/write-ci-profile.sh` | CLI profile `ci`, pointing at the agent Service inside the cluster |
+| `.github/workflows/reality-sync.yml` | Every 10 minutes or manual. Opens a PR or an Issue |
+| `.github/workflows/verify.yml` | PR check: simulates the stacks; bot PRs must show "no changes" |
+| `.github/workflows/build-runner-image.yml`, `runner/Dockerfile` | Runner image (actions-runner + formae + pkl + jq), pushed to GHCR |
+| `setup/` | Demo namespace and agent RBAC, plus ARC values for the `formae-kcd` runner scale set |
+
+## Tested with formae 0.90.5 on GKE 1.35
+
+- **Discovery** through `GKEAuth` + Workload Identity: existing cluster objects show up as
+  `unmanaged`.
+- **Deploy** of the `kcd-demo-app` stack (ConfigMap + Deployment), with write access only in
+  the `kcd-demo` namespace.
+- **`extract --desired`** round-trips: applying its output gives "No changes needed".
+- **Drift** from a `kubectl` change is reported as exactly the two changed keys.
+- **Revert** (code wins) restores the ConfigMap and patches only the declared fields.
+- **Absorb** (reality wins) followed by extract gives a diff of exactly the two changed keys.
+- **`rollout restart`**: the `restartedAt` annotation does not leak into desired state.
+
+Cloud SQL is deliberately left out. With GCP plugin 0.1.18, `GCP::SQL::DatabaseInstance` does
+not support updates, and extract fails after absorb because of a field outside the schema.
+
+## Run it yourself
+
+You need a Kubernetes cluster running the formae agent 0.90.5 (Helm install, Service
+`formae.formae.svc:49684`, basic auth) and a laptop where `formae agent status --profile gke-kcd`
+works. Replace `armansaa` in `setup/arc/runner-scale-set.yaml` with your GitHub account.
+
+**1. Create a GitHub App for the bot.** Settings → Developer settings → GitHub Apps → New GitHub
+App. Turn the webhook off and allow installation only on your account. Repository permissions:
+Contents, Pull requests, Issues and Administration, all **Read and write** (ARC uses
+Administration to register runners). Then generate a private key (`.pem`), install the App on
+this repo only, and note the **App ID** and the **Installation ID** (the number at the end of the
+installation page URL).
+
+**2. Prepare the cluster and the stack.**
 
 ```bash
 kubectl apply -f setup/kcd-demo-namespace-rbac.yaml
+formae apply --mode reconcile --profile gke-kcd stacks/kcd-demo-app.pkl
 ```
 
-### 5. Actions Runner Controller di GKE
+**3. Push the repo and publish the runner image.** The first push runs `build-runner-image`.
+When it finishes, set the `formae-kcd-runner` package visibility to **Public** so the cluster
+can pull it without credentials.
+
+**4. Configure the repo.** Under Settings → Secrets and variables → Actions:
+
+| Kind | Name | Value |
+|---|---|---|
+| Variable | `APP_ID` | App ID from step 1 |
+| Secret | `APP_PRIVATE_KEY` | Full contents of the `.pem` file |
+| Secret | `FORMAE_USER` | Agent basic auth username |
+| Secret | `FORMAE_PASSWORD` | Agent password in plain text, not the bcrypt hash |
+
+Under Settings → Actions → General, set fork pull request workflows to **Require approval for
+all outside collaborators**.
+
+**5. Install Actions Runner Controller.**
 
 ```bash
 helm install arc -n arc-systems --create-namespace \
@@ -140,43 +134,23 @@ kubectl create namespace arc-runners
 kubectl -n arc-runners create secret generic arc-github-app \
   --from-literal=github_app_id=<APP_ID> \
   --from-literal=github_app_installation_id=<INSTALLATION_ID> \
-  --from-file=github_app_private_key=<path/ke/key.pem>
+  --from-file=github_app_private_key=<path/to/key.pem>
 
 helm install formae-kcd -n arc-runners -f setup/arc/runner-scale-set.yaml \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
-
-kubectl -n arc-systems get pods     # controller + listener formae-kcd harus Running
 ```
 
-Runner `formae-kcd` akan muncul di Settings → Actions → Runners.
+The controller and the `formae-kcd` listener must be Running in `arc-systems`, and the runner
+appears under Settings → Actions → Runners.
 
-### 6. Run pertama
+**6. Run it once.** Actions → **reality-sync** → Run workflow. Expected summary: "clean, no
+drift".
 
-Actions → **reality-sync** → Run workflow. Hasil yang diharapkan: ringkasan
-"bersih, tidak ada drift".
+## Known limitations
 
-## Skenario demo G1: promo dinyalakan tanpa PR
-
-```bash
-kubectl -n kcd-demo patch configmap promo-config \
-  --type merge -p '{"data":{"PROMO_ENABLED":"true","DISCOUNT_PCT":"25"}}'
-kubectl -n kcd-demo rollout restart deploy/promo-api
-```
-
-Tunggu sync agent (≤10 menit), lalu Run workflow **reality-sync** (atau tunggu jadwal).
-Hasil: PR `reality-sync: drift diserap di kcd-demo-app` berisi diff dua key di
-`stacks/kcd-demo-app.pkl`, dengan check `verify` hijau.
-
-- **Merge** → Git sama dengan kenyataan.
-- **Tutup** → terapkan isi `main` manual dari laptop
-  (`formae apply --mode reconcile --profile gke-kcd stacks/kcd-demo-app.pkl`); karena drift
-  sudah diserap, itu tampil sebagai perubahan kode biasa (kode menang).
-
-## Batasan yang diketahui
-
-- Jadwal GitHub minimal 5 menit dan bisa telat; ditambah sync agent 10 menit. Untuk panggung,
-  picu perubahan beberapa menit sebelum segmen dan pakai *Run workflow*.
-- Resource baru (Wajah 2, mis. CronJob dibuat via `kubectl`) belum masuk loop. Itu langkah
-  berikutnya: discovery → allowlist → adopt → PR.
-- File di `stacks/` adalah kode hasil generate; edit manual tetap boleh lewat PR, tapi bot akan
-  menimpanya dengan hasil `extract --desired` setelah drift berikutnya.
+- **Latency.** The agent syncs every 10 minutes and GitHub schedules can start late, so a change
+  can take a while to reach a PR. Use *Run workflow* to skip the schedule wait.
+- **New resources are not in the loop yet.** A CronJob created with `kubectl` is not adopted.
+  Next step: discovery → allowlist → adopt → PR.
+- **`stacks/` is generated code.** Manual edits through a PR are fine, but the bot overwrites
+  them with `extract --desired` output after the next drift.

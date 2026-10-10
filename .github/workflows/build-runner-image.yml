@@ -1,5 +1,5 @@
-# Membangun image runner ARC yang sudah berisi formae CLI + pkl + jq.
-# Jalan di runner GitHub-hosted (tidak butuh akses ke cluster).
+# Builds the ARC runner image with the formae CLI, pkl and jq preinstalled.
+# Runs on a GitHub-hosted runner (no cluster access needed).
 name: build-runner-image
 
 on:

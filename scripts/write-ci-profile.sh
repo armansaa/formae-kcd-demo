@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Menulis profile formae `ci` untuk runner di dalam GKE: bicara langsung ke Service agent
-# (ClusterIP, tanpa port-forward). Kredensial basic auth dari env (GitHub Secrets).
+# Writes the formae `ci` profile for the runner inside GKE: it talks straight to the agent
+# Service (ClusterIP, no port-forward). Basic auth credentials come from env (GitHub Secrets).
 set -euo pipefail
-: "${FORMAE_USER:?FORMAE_USER kosong (secret repo)}"
-: "${FORMAE_PASSWORD:?FORMAE_PASSWORD kosong (secret repo)}"
+: "${FORMAE_USER:?FORMAE_USER is empty (repo secret)}"
+: "${FORMAE_PASSWORD:?FORMAE_PASSWORD is empty (repo secret)}"
 AGENT_HOST="${FORMAE_AGENT_HOST:-formae.formae.svc.cluster.local}"
 AGENT_PORT="${FORMAE_AGENT_PORT:-49684}"
 

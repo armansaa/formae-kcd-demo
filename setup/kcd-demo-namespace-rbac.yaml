@@ -1,9 +1,9 @@
-# Disiapkan tim infra (bukan formae): namespace demo + izin tulis untuk agent formae.
+# Prepared by the infra team (not formae): the demo namespace + write access for the formae agent.
 #
-# Agent formae memakai GKEAuth tanpa kredensial eksplisit, jadi ia masuk ke API server GKE
-# sebagai GSA formae-agent@kcd-2026 (Workload Identity / ADC). Izin baca ke seluruh cluster
-# datang dari IAM project (roles/viewer: baca objek k8s kecuali Secret). Izin tulis sengaja
-# hanya di namespace kcd-demo, lewat RBAC di bawah ini.
+# The formae agent uses GKEAuth without explicit credentials, so it reaches the GKE API server as
+# the GSA formae-agent@kcd-2026 (Workload Identity / ADC). Its cluster-wide read access comes from
+# project IAM (roles/viewer: read k8s objects except Secrets). Write access is deliberately limited
+# to the kcd-demo namespace through the RBAC below.
 #
 #   kubectl apply -f setup/kcd-demo-namespace-rbac.yaml
 apiVersion: v1

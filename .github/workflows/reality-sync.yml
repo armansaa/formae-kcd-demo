@@ -1,15 +1,15 @@
-# reality-sync — realitas menang, Git mencatat.
+# reality-sync — reality wins, Git keeps the record.
 #
-# Tiap 10 menit (dan manual lewat "Run workflow"): cek drift stack di agent formae,
-# serap otomatis kalau lolos pagar, lalu buka/perbarui PR yang menyamakan Git dengan
-# kenyataan. Drift yang kena pagar (delete/create, tipe di luar allowlist) membuka Issue.
+# Every 10 minutes (and manually via "Run workflow"): check the stack for drift on the formae
+# agent, absorb it automatically if it passes the guardrails, then open/update a PR that brings
+# Git in line with reality. Drift that hits a guardrail opens an Issue instead.
 #
-# Jalan di runner self-hosted (ARC) DI DALAM GKE, karena agent formae hanya ClusterIP.
+# Runs on a self-hosted runner (ARC) INSIDE GKE, because the formae agent is ClusterIP only.
 name: reality-sync
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # GitHub bisa telat beberapa menit saat ramai
+    - cron: "*/10 * * * *"   # GitHub may start scheduled runs a few minutes late
   workflow_dispatch:
 
 concurrency:
@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   sync:
-    runs-on: formae-kcd          # nama runner scale set ARC (setup/arc/runner-scale-set.yaml)
+    runs-on: formae-kcd          # ARC runner scale set name (setup/arc/runner-scale-set.yaml)
     timeout-minutes: 15
     strategy:
       max-parallel: 1
@@ -32,7 +32,7 @@ jobs:
       FORMAE_USER: ${{ secrets.FORMAE_USER }}
       FORMAE_PASSWORD: ${{ secrets.FORMAE_PASSWORD }}
     steps:
-      - name: Token GitHub App (bot)
+      - name: GitHub App token (bot)
         id: app
         uses: actions/create-github-app-token@v2
         with:
@@ -43,21 +43,21 @@ jobs:
         with:
           token: ${{ steps.app.outputs.token }}
 
-      - name: Profile formae ke agent di cluster
+      - name: formae profile for the in-cluster agent
         run: ./scripts/write-ci-profile.sh
 
-      - name: Resolve dependensi Pkl
+      - name: Resolve Pkl dependencies
         run: pkl project resolve
 
-      - name: Deteksi dan serap drift
+      - name: Detect and absorb drift
         id: sync
         run: ./scripts/reality-sync.sh "${{ matrix.stack.file }}" "${{ matrix.stack.name }}"
 
-      - name: Ringkasan run
+      - name: Run summary
         if: always() && steps.sync.outputs.summary != ''
         run: cat "${{ steps.sync.outputs.summary }}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Buka / perbarui PR
+      - name: Open / update PR
         if: steps.sync.outputs.status == 'absorbed'
         uses: peter-evans/create-pull-request@v7
         with:
@@ -66,12 +66,12 @@ jobs:
           branch: reality-sync/${{ matrix.stack.name }}
           delete-branch: true
           add-paths: ${{ matrix.stack.file }}
-          commit-message: "reality-sync(${{ matrix.stack.name }}): serap drift dari cluster"
-          title: "reality-sync: drift diserap di ${{ matrix.stack.name }}"
+          commit-message: "reality-sync(${{ matrix.stack.name }}): absorb drift observed in cluster"
+          title: "reality-sync: drift absorbed in ${{ matrix.stack.name }}"
           body-path: ${{ steps.sync.outputs.summary }}
           labels: reality-sync
 
-      - name: Buka Issue (drift diblokir pagar)
+      - name: Open Issue (drift blocked by guardrails)
         if: steps.sync.outputs.status == 'blocked'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
@@ -81,13 +81,14 @@ jobs:
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
           auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
           label="reality-sync-blocked"
+          title="reality-sync BLOCKED: ${STACK}"
           open=$(curl -fsS "${auth[@]}" "$api/issues?state=open&labels=${label}" \
-                 | jq --arg t "reality-sync DIBLOKIR: ${STACK}" '[.[] | select(.title == $t)] | length')
+                 | jq --arg t "$title" '[.[] | select(.title == $t)] | length')
           if [ "$open" -gt 0 ]; then
-            echo "Issue untuk ${STACK} masih terbuka, tidak membuat yang baru."
+            echo "An Issue for ${STACK} is still open, not creating another one."
             exit 0
           fi
-          jq -n --arg t "reality-sync DIBLOKIR: ${STACK}" --rawfile b "$SUMMARY" --arg l "$label" \
+          jq -n --arg t "$title" --rawfile b "$SUMMARY" --arg l "$label" \
              '{title: $t, body: $b, labels: [$l]}' \
           | curl -fsS "${auth[@]}" -X POST "$api/issues" -d @- > /dev/null
-          echo "Issue dibuat."
+          echo "Issue created."

@@ -1,6 +1,6 @@
 amends "pkl:Project"
 
-// Versi dikunci dan HARUS sama dengan agent formae di GKE (image 0.90.5).
+// Versions are pinned and MUST match the formae agent in GKE (image 0.90.5).
 dependencies {
   ["formae"] {
     uri = "package://hub.platform.engineering/plugins/pkl/schema/pkl/formae/formae@0.90.5"
