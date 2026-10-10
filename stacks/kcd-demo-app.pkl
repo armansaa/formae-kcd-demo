@@ -1,0 +1,132 @@
+extends "@formae/forma.pkl"
+import "@formae/formae.pkl"
+
+// Resource imports
+import "@k8s/v1.36/core/ConfigMap.pkl" as ConfigMap
+import "@k8s/v1.36/apps/Deployment.pkl" as Deployment
+// Dependency imports
+import "@k8s/shared.pkl" as shared
+import "@k8s/v1.36/k8s.pkl" as k8s
+
+local class _formaeDesiredConfig_0 {
+ `ApiVersion`: Any
+ @formae.ConfigFieldHint { createOnly = true }
+ `Auth`: Any
+ `Type`: Any
+ @formae.ConfigFieldHint { createOnly = false }
+ hidden `KubernetesVersion`: Any = null
+}
+
+forma {
+
+ local kcdDemoApp = new formae.Stack {
+  label = "kcd-demo-app"
+  description = "KCD demo: G1 ConfigMap promo + G2 memory limit"
+ }
+ kcdDemoApp
+
+
+ local k8sGkeResearchLab = new formae.Target {
+  label = "k8s-gke-research-lab"
+  namespace = "K8S"
+  reap = new formae.ReapAfter { maxUnreachable = 86400.s }
+  discoverable = true
+  config = new _formaeDesiredConfig_0 {
+   `ApiVersion` = "v1.35"
+   `Auth` = new Mapping {
+    ["CertificateAuthority"] = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUVMVENDQXBXZ0F3SUJBZ0lSQU5mQTZCTldPQVU0TllUejRJSHA3THN3RFFZSktvWklodmNOQVFFTEJRQXcKTHpFdE1Dc0dBMVVFQXhNa1lURTNOV1EwTURrdFpXUTBZUzAwTWpjeUxUZ3daVFl0T1RVNU1ERmpaRFk1Wm1FeQpNQ0FYRFRJMk1UQXdNakEyTkRreE5Wb1lEekl3TlRZd09USTBNRGMwT1RFMVdqQXZNUzB3S3dZRFZRUURFeVJoCk1UYzFaRFF3T1MxbFpEUmhMVFF5TnpJdE9EQmxOaTA1TlRrd01XTmtOamxtWVRJd2dnR2lNQTBHQ1NxR1NJYjMKRFFFQkFRVUFBNElCandBd2dnR0tBb0lCZ1FDN1NvZjlURnZyZ3EvQUtDMzltOWZZd3lPYVM0b0YwUHZVeWp0OAp2dUMyWHhYTWFleEVleXJPeUNJMWtIakNTWmpwekVoTkx4Ylp1eXFTbzI2ZDNaWGNpMzY0dUFnWkxKbW5ickEyCkxWcUw4ZGNmZEhoKzkxaUI1TnJ5M05OakFFSDdweHpGaXh3YmRjdjZjL0lQbGYvTDFPeGV0TWQzano1TjQrVUQKR0VUUkdZSk1BekltZHU4Z1VFRmVXQkRsZXlTeG52d2N4L3RQeTV3TmVhZGMwc1dBZ2tqUVBiWC9MVmxDQlNiKwpxQ1U0VDJLcnkyVVBxeUhvZmZQNklLeWt4MGRqeFNrTVVycHNIQm1kRHEzRElUVS9uWVNTek9mTlExU1BlT3VHCm8xNTkzbGhZU2ZwL3ZiWFZkMDRtMHMxNFZrNllQakxkU3J0NVUrdkhteVdacnJjTGg4L1ZWUEpaaDdtWHA3MkYKbHNlQVpPdjZTQW00VDN3eU5CK2RaL0JSWVVRUHdvSEU5RXRkNUE4ZGpuQWRPVGx6TmU3RFJlY1lSOXFkQ3RHcApHS01EbGJoOENsdWFmbTRDQ010dHRxbnAxU2kvbXNvK3QwM0VwVThGWlFISzIxc1pVaXRrcGl0eWJTM2RmdTU1ClEwSmcxU2t5dFY1Z1Azd1FIOC9Gck1wdm56MENBd0VBQWFOQ01FQXdEZ1lEVlIwUEFRSC9CQVFEQWdJRU1BOEcKQTFVZEV3RUIvd1FGTUFNQkFmOHdIUVlEVlIwT0JCWUVGQU8xQlVSeExTbmdzYVJCVmZVV1lKUG9vbUUzTUEwRwpDU3FHU0liM0RRRUJDd1VBQTRJQmdRQzROTmlSZ1BRUzMyY3h0MVVydk5tdVNOS0EwZ1I4SjNGVUFQZkNUYXAxCjVKbkdzYXdWS3d6dDNZQW1rcUpUb3hUdkpDM3NtYUIrZGpZY3B5S2JFTXAwRFpEQ3RMaFgySElRa3hpUVdHQlkKSWZmemlmNW10UjRvVE9aRDlOdjFKVTBmQk5UQlJ1NllQQk0wYjE1ZXZXMEVJNE1Cc1MyYmlNTzdxVGV6Z1dLWgpRZ2FYZ09tNWpCWm11azRjSFY4YldUV2E1cGs2M2tOMzNjR0g0cFBwcmNucytUdUMvZzI3Vm1oU3dtak5XQVZ1CjN3cytLSHhEYmtwMExKUUpmSmplVXE0bXB6RVpGWm95eW1OdENwY042S29vWThudDRzZ0EvUVdkQm1qYUNQRDIKV0JkNVIvT1ltYmVrcmN4ZnNUS21oeGppWVJSSmlmUmdjeEpPRlF6ZDEvNUU2U0hRVGswdWdVb2RJblZQL1VuNgo2cWpvTXFFZm1wZ2RPVE41N2lFeE90V0wwNFFiOVU4a2FjUCtyVW84UGV4NmtOajlpSDdFZURnYVZiUGFlTW1LCnc2aE1LdzZ0NmZmNEdYaitZQWkyREVMNUc3NXhSYlZuSFhacEN1MllxTWUwUDdkaS9JVUxJL3hIaTk3dk4zQzgKRSt3N25CYlBwYXMxTXFja01SZkc5U1k9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K"
+    ["ClusterName"] = "gke-research-lab"
+    ["Endpoint"] = "https://34.50.120.71"
+    ["Location"] = "asia-southeast2-a"
+    ["ProjectId"] = "kcd-2026"
+    ["Type"] = "GKE"
+   }
+   `Type` = "K8S"
+  }
+ }
+ k8sGkeResearchLab
+
+ new ConfigMap.ConfigMap {
+  label = "promo-config"
+  apiVersion = "v1"
+  kind = "ConfigMap"
+  metadata = new shared.NamespacedObjectMeta {
+   name = "promo-config"
+   namespace = "kcd-demo"
+   labels = new Mapping {
+    ["app"] = "promo-api"
+    ["managed-by"] = "formae"
+   }
+  }
+  data = new Mapping {
+   ["DISCOUNT_PCT"] = "25"
+   ["PROMO_ENABLED"] = "true"
+  }
+  target = new formae.TargetResolvable { label = "k8s-gke-research-lab" }
+  stack = new formae.StackResolvable { label = "kcd-demo-app" }
+ }
+
+ new Deployment.Deployment {
+  label = "promo-api"
+  apiVersion = "apps/v1"
+  kind = "Deployment"
+  metadata = new shared.NamespacedObjectMeta {
+   name = "promo-api"
+   namespace = "kcd-demo"
+   labels = new Mapping {
+    ["app"] = "promo-api"
+    ["managed-by"] = "formae"
+   }
+  }
+  spec = new Deployment.DeploymentSpec {
+   template = new k8s.PodTemplateSpec {
+    metadata = new k8s.PodTemplateMetadata {
+     labels = new Mapping {
+      ["app"] = "promo-api"
+      ["managed-by"] = "formae"
+     }
+    }
+    spec = new k8s.PodSpec {
+     dnsPolicy = "ClusterFirst"
+     terminationGracePeriodSeconds = 30
+     schedulerName = "default-scheduler"
+     restartPolicy = "Always"
+     containers = new Listing { new k8s.Container {
+       image = "mirror.gcr.io/library/busybox:1.36"
+       terminationMessagePolicy = "File"
+       terminationMessagePath = "/dev/termination-log"
+       resources = new k8s.ResourceRequirements {
+        requests = new Mapping {
+         ["cpu"] = "10m"
+         ["memory"] = "16Mi"
+        }
+        limits = new Mapping {
+         ["cpu"] = "50m"
+         ["memory"] = "64Mi"
+        }
+       }
+       command = new Listing { "sh"; "-c" }
+       args = new Listing { "while true; do echo \"PROMO_ENABLED=$PROMO_ENABLED DISCOUNT_PCT=$DISCOUNT_PCT\"; sleep 30; done" }
+       name = "promo-api"
+       envFrom = new Listing { new k8s.EnvFromSource {
+         configMapRef = new k8s.ConfigMapEnvSource {
+          name = "promo-config"
+         }
+        } }
+      } }
+    }
+   }
+   replicas = 1
+   revisionHistoryLimit = 10
+   selector = new k8s.LabelSelector {
+    matchLabels = new Mapping {
+     ["app"] = "promo-api"
+     ["managed-by"] = "formae"
+    }
+   }
+   progressDeadlineSeconds = 600
+  }
+  target = new formae.TargetResolvable { label = "k8s-gke-research-lab" }
+  stack = new formae.StackResolvable { label = "kcd-demo-app" }
+ }
+}

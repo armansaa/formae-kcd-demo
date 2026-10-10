@@ -1,0 +1,49 @@
+# verify — check di setiap PR: apa yang akan terjadi kalau isi PR ini diterapkan ke agent?
+#
+# Untuk PR dari bot (branch reality-sync/*), hasilnya WAJIB "tidak ada perubahan":
+# itu bukti Git sudah sama dengan kenyataan. Untuk PR manusia, rencana perubahan
+# ditampilkan di ringkasan run.
+name: verify
+
+on:
+  pull_request:
+    paths:
+      - "stacks/**"
+      - "PklProject"
+
+permissions:
+  contents: read
+
+jobs:
+  simulate:
+    # Repo publik + runner self-hosted: JANGAN pernah menjalankan kode dari fork.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: formae-kcd
+    timeout-minutes: 10
+    env:
+      FORMAE_USER: ${{ secrets.FORMAE_USER }}
+      FORMAE_PASSWORD: ${{ secrets.FORMAE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/write-ci-profile.sh
+      - run: pkl project resolve
+      - name: Simulate semua stack
+        env:
+          BOT_PR: ${{ startsWith(github.head_ref, 'reality-sync/') }}
+        run: |
+          fail=0
+          for f in stacks/*.pkl; do
+            set +e
+            formae apply --mode reconcile --simulate --profile ci \
+              --output-consumer machine --output-schema json "$f" > sim.json 2> sim.err
+            rc=$?
+            set -e
+            changes=$(jq -r '.ChangesRequired // .Simulation.ChangesRequired // "drift"' sim.json 2>/dev/null || echo error)
+            echo "### \`$f\`: rc=$rc, ChangesRequired=$changes" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"; head -c 4000 sim.json >> "$GITHUB_STEP_SUMMARY"; echo; echo '```' >> "$GITHUB_STEP_SUMMARY"
+            if [ "$BOT_PR" = "true" ] && { [ $rc -ne 0 ] || [ "$changes" != "false" ]; }; then
+              echo "::error file=$f::PR bot tapi Git belum sama dengan kenyataan"
+              fail=1
+            fi
+          done
+          exit $fail

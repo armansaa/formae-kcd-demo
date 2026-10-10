@@ -1,0 +1,32 @@
+# Values untuk chart gha-runner-scale-set (ARC). Runner hidup di namespace arc-runners,
+# satu pod per job, dan dari sana menjangkau agent formae lewat Service ClusterIP.
+#
+#   helm install formae-kcd \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     -n arc-runners --create-namespace -f setup/arc/runner-scale-set.yaml
+githubConfigUrl: https://github.com/armansaa/formae-kcd-demo
+# Secret berisi kredensial GitHub App (lihat README langkah 5):
+githubConfigSecret: arc-github-app
+
+# Nama ini yang dipakai di `runs-on:` workflow.
+runnerScaleSetName: formae-kcd
+
+# 0 = pod runner baru dibuat per job (hemat). Untuk hari demo, set 1 supaya tidak menunggu
+# pod naik (~30-60 detik).
+minRunners: 0
+maxRunners: 1
+
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/armansaa/formae-kcd-runner:0.90.5
+        imagePullPolicy: Always
+        command: ["/home/runner/run.sh"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
