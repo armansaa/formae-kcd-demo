@@ -85,10 +85,16 @@ forma {
       ["app"] = "promo-api"
       ["managed-by"] = "formae"
      }
+     annotations = new Mapping {
+      ["kubectl.kubernetes.io/restartedAt"] = "2026-10-10T18:00:39+07:00"
+     }
     }
     spec = new k8s.PodSpec {
      dnsPolicy = "ClusterFirst"
      terminationGracePeriodSeconds = 30
+     securityContext = new k8s.PodSecurityContext {
+
+     }
      schedulerName = "default-scheduler"
      restartPolicy = "Always"
      containers = new Listing { new k8s.Container {
@@ -102,7 +108,7 @@ forma {
         }
         limits = new Mapping {
          ["cpu"] = "50m"
-         ["memory"] = "64Mi"
+         ["memory"] = "256Mi"
         }
        }
        command = new Listing { "sh"; "-c" }
@@ -122,6 +128,13 @@ forma {
     matchLabels = new Mapping {
      ["app"] = "promo-api"
      ["managed-by"] = "formae"
+    }
+   }
+   strategy = new Deployment.DeploymentStrategy {
+    type = "RollingUpdate"
+    rollingUpdate = new Deployment.RollingUpdateDeployment {
+     maxSurge = "25%"
+     maxUnavailable = "25%"
     }
    }
    progressDeadlineSeconds = 600
