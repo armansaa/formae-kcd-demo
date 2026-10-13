@@ -1,0 +1,90 @@
+# Triggers the reality-sync workflow every 10 minutes from inside the cluster.
+#
+# GitHub's own `schedule` trigger is best effort: on this repo a */10 cron fired only a few
+# times a day. This CronJob calls the workflow_dispatch API instead, so the cadence is owned by
+# the cluster. It reuses the GitHub App credentials ARC already has (Secret arc-github-app);
+# the App needs the repository permission "Actions: Read and write".
+#
+#   kubectl apply -f setup/arc/reality-sync-trigger.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reality-sync-trigger
+  namespace: arc-runners
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: dispatch
+              image: ghcr.io/armansaa/formae-kcd-runner:0.90.5
+              env:
+                - name: REPO
+                  value: armansaa/formae-kcd-demo
+                - name: WORKFLOW
+                  value: reality-sync.yml
+                - name: REF
+                  value: main
+                - name: APP_ID
+                  valueFrom:
+                    secretKeyRef: { name: arc-github-app, key: github_app_id }
+                - name: INSTALLATION_ID
+                  valueFrom:
+                    secretKeyRef: { name: arc-github-app, key: github_app_installation_id }
+              volumeMounts:
+                - name: app-key
+                  mountPath: /app-key
+                  readOnly: true
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  api=https://api.github.com
+                  accept="Accept: application/vnd.github+json"
+                  b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+                  # 1. JWT signed with the App private key (valid 9 minutes).
+                  now=$(date +%s)
+                  header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+                  claims=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$APP_ID" | b64url)
+                  sig=$(printf '%s.%s' "$header" "$claims" \
+                        | openssl dgst -sha256 -sign /app-key/github_app_private_key -binary | b64url)
+
+                  # 2. Installation token limited to this repo and to actions:write.
+                  curl -sS -X POST -H "Authorization: Bearer $header.$claims.$sig" -H "$accept" \
+                    "$api/app/installations/$INSTALLATION_ID/access_tokens" \
+                    -d "{\"repositories\":[\"${REPO#*/}\"],\"permissions\":{\"actions\":\"write\"}}" > /tmp/token.json
+                  token=$(jq -r '.token // empty' /tmp/token.json)
+                  if [ -z "$token" ]; then
+                    echo "Could not get an installation token: $(jq -c '{message, errors}' /tmp/token.json)" >&2
+                    exit 1
+                  fi
+
+                  # 3. Dispatch the workflow.
+                  code=$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST \
+                    -H "Authorization: Bearer $token" -H "$accept" \
+                    "$api/repos/$REPO/actions/workflows/$WORKFLOW/dispatches" -d "{\"ref\":\"$REF\"}")
+                  if [ "$code" != "204" ]; then
+                    echo "Dispatch failed (HTTP $code): $(cat /tmp/dispatch.json)" >&2
+                    exit 1
+                  fi
+                  echo "Dispatched $WORKFLOW on $REPO@$REF"
+          volumes:
+            - name: app-key
+              secret:
+                secretName: arc-github-app
+                items:
+                  - key: github_app_private_key
+                    path: github_app_private_key
