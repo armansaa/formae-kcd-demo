@@ -32,8 +32,12 @@ bot opens a PR so Git matches the cluster again.
 ```bash
 kubectl -n kcd-demo patch configmap promo-config \
   --type merge -p '{"data":{"PROMO_ENABLED":"true","DISCOUNT_PCT":"25"}}'
-kubectl -n kcd-demo rollout restart deploy/promo-api
+kubectl -n kcd-demo delete pod -l app=promo-api
 ```
+
+Deleting the pod makes the app pick up the new values without touching the Deployment. A
+`rollout restart` would also work, but it stamps a `restartedAt` annotation on the Deployment,
+which is a second out-of-band change.
 
 Wait for the agent's sync (up to 10 minutes), then run the **reality-sync** workflow or wait for
 the next trigger. It opens a PR `reality-sync: drift absorbed in kcd-demo-app` with a two-key diff in
@@ -85,7 +89,11 @@ Nobody approves drift before it is absorbed, so these rules are the only brakes:
 - **Drift** from a `kubectl` change is reported as exactly the two changed keys.
 - **Revert** (code wins) restores the ConfigMap and patches only the declared fields.
 - **Absorb** (reality wins) followed by extract gives a diff of exactly the two changed keys.
-- **`rollout restart`**: the `restartedAt` annotation does not leak into desired state.
+- **Deployment drift** (memory limit raised with `kubectl set resources`) is absorbed and
+  verified, but the extract is wider than the change: it also records the `restartedAt`
+  annotation left by an earlier `rollout restart`, the default `strategy` block and an empty
+  `securityContext`. Once `restartedAt` is in the stack file, every later `rollout restart`
+  counts as drift.
 
 Cloud SQL is deliberately left out. With GCP plugin 0.1.18, `GCP::SQL::DatabaseInstance` does
 not support updates, and extract fails after absorb because of a field outside the schema.
