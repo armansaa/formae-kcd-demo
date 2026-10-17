@@ -59,8 +59,8 @@ forma {
    }
   }
   data = new Mapping {
-   ["DISCOUNT_PCT"] = "50"
-   ["PROMO_ENABLED"] = "true"
+   ["DISCOUNT_PCT"] = "10"
+   ["PROMO_ENABLED"] = "false"
   }
   target = new formae.TargetResolvable { label = "k8s-gke-research-lab" }
   stack = new formae.StackResolvable { label = "kcd-demo-app" }
