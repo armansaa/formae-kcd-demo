@@ -153,11 +153,11 @@ forma {
     spec = new k8s.PodSpec {
      dnsPolicy = "ClusterFirst"
      terminationGracePeriodSeconds = 30
-     schedulerName = "default-scheduler"
-     restartPolicy = "Always"
      securityContext = new k8s.PodSecurityContext {
 
      }
+     schedulerName = "default-scheduler"
+     restartPolicy = "Always"
      containers = new Listing { new k8s.Container {
        image = "mirror.gcr.io/library/busybox:1.36"
        terminationMessagePolicy = "File"
@@ -169,7 +169,7 @@ forma {
         }
         limits = new Mapping {
          ["cpu"] = "50m"
-         ["memory"] = "64Mi"
+         ["memory"] = "256Mi"
         }
        }
        command = new Listing { "sh"; "-c" }
