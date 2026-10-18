@@ -50,12 +50,14 @@ if [[ $rc -eq 0 ]]; then
   if [[ "$changes" == "true" ]]; then
     # No drift, but the file in Git differs from the agent's desired state. Happens when a
     # previous reality-sync PR is still open or was closed, or a human edited main.
-    # The bot NEVER applies code changes; that is a human decision.
+    # reality-sync NEVER applies code changes; code reaches the cluster only through the
+    # apply workflow, on a merge to main.
     {
       echo "### reality-sync: \`$STACK\` — file differs from the agent, no drift"
       echo
       echo "Nothing changed outside formae. The file on \`main\` differs from the agent's desired"
-      echo "state (a reality-sync PR is not merged yet, or the code was edited). The bot does not apply it."
+      echo "state (a reality-sync PR is not merged yet, or the code was edited). reality-sync does not"
+      echo "apply it; the \`apply\` workflow does, on the next push to \`main\` or when run by hand."
     } >> "$SUMMARY"
     finish code-differs
   fi
@@ -97,26 +99,7 @@ blocked_reasons="$(jq -r --arg allowed "$ALLOWED_TYPES" '
       "- `\(.Type)` `\(.Label)`: type is not in the allowlist"
     else empty end' "$OUT/resources.json")"
 
-render_changes() {
-  jq -r '
-    def leaves: [paths(scalars) as $p
-      | {key: ($p | map(if type == "number" then "[\(.)]" else ".\(.)" end) | join("") | ltrimstr(".")),
-         value: getpath($p)}] | from_entries;
-    def cell($m; $k): if $m | has($k) then "`\($m[$k] | tostring | gsub("\\|"; "\\|"))`" else "_not set_" end;
-    .[]
-    | ((.OldProperties // {}) | leaves) as $before
-    | ((.Properties // {}) | leaves) as $after
-    | [ ($before + $after | keys[]) as $k
-        | select(($before | has($k) | not) or ($after | has($k) | not) or $before[$k] != $after[$k])
-        | "| `\($k)` | \(cell($before; $k)) | \(cell($after; $k)) |" ] as $rows
-    | "**`\(.Type)` `\(.Label)`** (\(.Operation))",
-      "",
-      ( if ($rows | length) > 0 then "| Field | Before | After |", "|---|---|---|", $rows[]
-        else ( (.PatchDocument // [])[]? |
-               "- `\(.op)` `\(.path)`" + (if has("value") then " → `\(.value | tostring)`" else "" end) ) end ),
-      ""' \
-    "$OUT/resources.json"
-}
+source "$(dirname "$0")/render-changes.sh"
 
 if [[ -n "$blocked_reasons" ]]; then
   {
@@ -128,7 +111,7 @@ if [[ -n "$blocked_reasons" ]]; then
     echo "$blocked_reasons"
     echo
     echo "Observed drift:"
-    render_changes
+    render_changes "$OUT/resources.json"
     echo
     echo "Decide manually: absorb (reality wins) or revert (code wins) with"
     echo "\`formae apply --mode reconcile $STACK_FILE\` from a machine connected to the agent."
@@ -187,7 +170,7 @@ rm -f "$OUT/original.pkl"
   echo "The changes below happened **outside formae** (kubectl/console) and the agent has"
   echo "recorded them as desired intent. This PR brings Git in line with reality."
   echo
-  render_changes
+  render_changes "$OUT/resources.json"
   echo
   echo "| | |"
   echo "|---|---|"
@@ -195,8 +178,8 @@ rm -f "$OUT/original.pkl"
   echo "| CommandId formae | \`$CMD_ID\` |"
   echo "| Run | ${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-} |"
   echo
-  echo "Disagree? Close this PR, then apply \`main\` manually from a machine connected to the"
-  echo "agent: \`formae apply --mode reconcile $STACK_FILE\`. Because the drift was already"
-  echo "absorbed, formae shows it as an ordinary code change (code wins)."
+  echo "Disagree? Close this PR, then run the \`apply\` workflow (Actions → apply → Run workflow)."
+  echo "Because the drift was already absorbed, formae treats \`main\` as an ordinary code change"
+  echo "and pushes it back to the cluster (code wins)."
 } >> "$SUMMARY"
 finish absorbed
