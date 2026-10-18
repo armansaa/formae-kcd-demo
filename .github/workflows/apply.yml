@@ -1,0 +1,52 @@
+# apply — code wins: push what is on main to the cluster.
+#
+# Runs on every push to main that touches a stack (in practice: a merged PR), and by hand via
+# "Run workflow". Each stack is simulated first: if nothing differs it does nothing (a merged
+# reality-sync PR lands here), and if there is unresolved drift it stops without applying.
+# Soft reconcile only, never --force.
+#
+# Runs on the self-hosted runner (ARC) INSIDE GKE, because the formae agent is ClusterIP only.
+name: apply
+
+on:
+  push:
+    branches: [main]
+    paths: ["stacks/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: formae-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: formae-kcd
+    timeout-minutes: 15
+    env:
+      FORMAE_USER: ${{ secrets.FORMAE_USER }}
+      FORMAE_PASSWORD: ${{ secrets.FORMAE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: formae profile for the in-cluster agent
+        run: ./scripts/write-ci-profile.sh
+
+      - name: Resolve Pkl dependencies
+        run: pkl project resolve
+
+      - name: Apply every stack
+        run: |
+          fail=0
+          for f in stacks/*.pkl; do
+            set +e
+            ./scripts/apply-stack.sh "$f"
+            rc=$?
+            set -e
+            summary="${RUNNER_TEMP}/apply-$(basename "$f" .pkl)/summary.md"
+            [ -f "$summary" ] && cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            [ "$rc" -eq 0 ] || fail=1
+          done
+          exit $fail

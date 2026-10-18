@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: reality-sync
+  group: formae-agent
   cancel-in-progress: false
 
 permissions:

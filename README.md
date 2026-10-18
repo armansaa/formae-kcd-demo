@@ -27,6 +27,10 @@ bot opens a PR so Git matches the cluster again.
                                             changes nothing ───────▶  Issue "BLOCKED"
 ```
 
+The other direction is ordinary GitOps: merge a change to `main` and the **apply** workflow
+pushes it to the cluster (code wins). It simulates first, does nothing when the agent already
+matches, and stops without applying when there is drift nobody has decided on yet.
+
 ## Demo: a promo switched on without a PR
 
 ```bash
@@ -44,10 +48,8 @@ the next trigger. It opens a PR `reality-sync: drift absorbed in kcd-demo-app` w
 `stacks/kcd-demo-app.pkl` and a green `verify` check.
 
 - **Merge** the PR: Git now matches reality.
-- **Close** the PR, then apply `main` yourself: code wins and the change is rolled back.
-  ```bash
-  formae apply --mode reconcile --profile gke-kcd stacks/kcd-demo-app.pkl
-  ```
+- **Close** the PR, then run the **apply** workflow (Actions → apply → Run workflow): code wins
+  and the change is rolled back.
 
 ## Guardrails
 
@@ -59,8 +61,10 @@ Nobody approves drift before it is absorbed, so these rules are the only brakes:
 3. **Type allowlist** (env `ALLOWED_TYPES`): `K8S::Core::ConfigMap`, `K8S::Apps::Deployment`,
    `K8S::Batch::CronJob`. One blocked resource stops the whole run, because formae takes a
    single resolution for all drifted resources.
-4. **The bot never applies code.** If `main` differs from the agent without drift (for example
-   after a closed bot PR), the run only records `code-differs`.
+4. **reality-sync never applies code.** If `main` differs from the agent without drift (for
+   example after a closed bot PR), the run only records `code-differs`. Code reaches the cluster
+   only through the `apply` workflow: on a push to `main` that touches `stacks/`, or by hand.
+   Both workflows share one concurrency group, so they never talk to the agent at the same time.
 5. **No fork PRs on the self-hosted runner.** PR workflows don't run for forks, and *Require
    approval for all outside collaborators* must be on.
 6. **No Kubernetes Secrets in the stack.** reality-sync writes live state into Git.
@@ -73,6 +77,8 @@ Nobody approves drift before it is absorbed, so these rules are the only brakes:
 | `scripts/reality-sync.sh` | Detect drift → guardrails → absorb → write back. Also runs by hand |
 | `scripts/write-ci-profile.sh` | CLI profile `ci`, pointing at the agent Service inside the cluster |
 | `.github/workflows/reality-sync.yml` | Triggered every 10 minutes or manually. Opens a PR or an Issue |
+| `.github/workflows/apply.yml`, `scripts/apply-stack.sh` | On a push to `main`: apply the stacks to the cluster (code wins), soft reconcile only |
+| `scripts/render-changes.sh` | Before/After table used in PR, Issue and run summaries |
 | `.github/workflows/verify.yml` | PR check: simulates the stacks; bot PRs must show "no changes" |
 | `.github/workflows/build-runner-image.yml`, `runner/Dockerfile` | Runner image (actions-runner + formae + pkl + jq), pushed to GHCR |
 | `setup/kcd-demo-namespace-rbac.yaml` | Demo namespace and write access for the agent |
@@ -170,5 +176,9 @@ drift".
   change can take up to 20 minutes to reach a PR. Use *Run workflow* to skip the second wait.
 - **New resources are not in the loop yet.** A CronJob created with `kubectl` is not adopted.
   Next step: discovery → allowlist → adopt → PR.
+- **Container fields are not applied from code.** With formae 0.90.5, changing a field inside a
+  Deployment's `containers` list in Git (for example `limits.memory`) produces no planned change,
+  so the apply workflow leaves it alone. Fields outside the list (such as `replicas`) and
+  ConfigMap values are applied. Drift in the other direction is still detected and absorbed.
 - **`stacks/` is generated code.** Manual edits through a PR are fine, but the bot overwrites
   them with `extract --desired` output after the next drift.
