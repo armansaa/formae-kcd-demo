@@ -8,4 +8,7 @@ dependencies {
   ["k8s"] {
     uri = "package://hub.platform.engineering/plugins/k8s/schema/pkl/k8s/k8s@0.1.13"
   }
+  ["gcp"] {
+    uri = "package://hub.platform.engineering/plugins/gcp/schema/pkl/gcp/gcp@0.1.18"
+  }
 }
