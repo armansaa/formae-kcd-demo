@@ -1,0 +1,53 @@
+extends "@formae/forma.pkl"
+import "@formae/formae.pkl"
+
+// Resource imports
+import "@gcp/storage/bucket.pkl" as bucket
+import "@gcp/gcp.pkl" as gcp
+
+
+
+forma {
+
+  local myStack = new formae.Stack {
+    label = "kcd-demo-bucket"
+    description = "Stack for KCD demo bucket"
+  }
+  myStack
+
+
+  local gcpKcd2026 = new formae.Target {
+    label = "gcp-kcd-2026"
+    namespace = "GCP"
+    reap = new formae.ReapAfter { maxUnreachable = 86400.s }
+    discoverable = true
+    config {
+      Location = "asia-southeast2-a"
+      Project = "kcd-2026"
+      Region = "asia-southeast2"
+      Type = "GCP"
+      Zone = "asia-southeast2-a"
+    }
+  }
+  gcpKcd2026
+
+  new bucket.Bucket {
+    label = "kcd-2026-test-bucket"
+    id = "kcd-2026-test-bucket"
+    location = "asia-southeast2"
+    name = "kcd-2026-test-bucket"
+    iamConfiguration = new bucket.IamConfiguration {
+      uniformBucketLevelAccess = new bucket.UniformBucketLevelAccess {
+        enabled = true
+        lockedTime = "2027-01-18T11:29:33.864Z"
+      }
+      publicAccessPrevention = "inherited"
+    }
+    projectNumber = "530714708622"
+    storageClass = "STANDARD"
+    timeCreated = "2026-10-20T11:29:33.864Z"
+    updated = "2026-10-20T11:29:33.864Z"
+    target = gcpKcd2026.res
+    stack = myStack.res
+  }
+}

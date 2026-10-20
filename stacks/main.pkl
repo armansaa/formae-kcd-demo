@@ -1,0 +1,38 @@
+/*
+ * © 2025 Platform Engineering Labs Inc.
+ *
+ * SPDX-License-Identifier: FSL-1.1-ALv2
+ */
+
+extends "@formae/forma.pkl"
+import "@formae/formae.pkl"
+
+// Import your resource plugin schema here, e.g.:
+// import "@aws/aws.pkl"
+// import "@ovh/ovh.pkl"
+
+properties: Props
+
+/// CLI properties for this forma: each member becomes a typed flag
+/// (member name = flag, declared default = default, doc comment = --help text).
+class Props {
+  /// The name to deploy
+  name: String = "my-name"
+}
+
+forma {
+  new formae.Stack {
+    label = "\(properties.name)-stack"
+    description = "Stack for my resources"
+  }
+
+  // Add a target with your plugin's config, e.g.:
+  // new formae.Target {
+  //   label = "my-target"
+  //   config = new aws.Config {
+  //     region = "us-east-2"
+  //   }
+  // }
+
+  // My Resources
+}

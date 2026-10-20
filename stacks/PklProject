@@ -1,0 +1,10 @@
+amends "pkl:Project"
+
+dependencies {
+  ["gcp"] {
+    uri = "package://hub.platform.engineering/plugins/gcp/schema/pkl/gcp/gcp@0.1.18"
+  }
+  ["formae"] {
+    uri = "package://hub.platform.engineering/plugins/pkl/schema/pkl/formae/formae@0.90.5"
+  }
+}
