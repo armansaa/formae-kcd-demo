@@ -169,7 +169,7 @@ forma {
         }
         limits = new Mapping {
          ["cpu"] = "50m"
-         ["memory"] = "256Mi"
+         ["memory"] = "64Mi"
         }
        }
        command = new Listing { "sh"; "-c" }
