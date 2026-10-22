@@ -24,10 +24,9 @@ template:
         image: ghcr.io/armansaa/formae-kcd-runner:0.90.5
         imagePullPolicy: Always
         command: ["/home/runner/run.sh"]
-        # Basic auth of the second agent (namespace formae-kcd), read by .github/actions/formae-agent
-        # for the taufik-formae-* workflows and reality-sync-kcd-2026 (composite actions can't read
-        # GitHub secrets). Secret formae-kcd-agent-auth, created with kubectl, plaintext password.
-        # The workflows for stacks/ keep using the FORMAE_USER / FORMAE_PASSWORD repo secrets.
+        # Basic auth of the formae agent (namespace formae-kcd), read by .github/actions/formae-agent
+        # (composite actions can't read GitHub secrets). Secret formae-kcd-agent-auth, created with
+        # kubectl, plaintext password.
         env:
           - name: FORMAE_AGENT_USERNAME
             valueFrom:

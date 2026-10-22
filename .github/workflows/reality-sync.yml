@@ -1,36 +1,75 @@
-# reality-sync — reality wins, Git keeps the record.
+# reality-sync: reality wins, Git keeps the record.
 #
-# Every 10 minutes (and manually via "Run workflow"): check the stack for drift on the formae
-# agent, absorb it automatically if it passes the guardrails, then open/update a PR that brings
-# Git in line with reality. Drift that hits a guardrail opens an Issue instead.
+# Every 10 minutes (CronJob setup/arc/reality-sync-trigger.yaml dispatches it) and
+# manually via "Run workflow": for every forma under projects/ whose stack exists on the agent,
+# check for drift, absorb it automatically if it passes the guardrails, then open/update a PR
+# that brings Git in line with reality (the file is rewritten by `formae extract --desired`).
+# Drift that hits a guardrail opens an Issue instead.
 #
-# Runs on a self-hosted runner (ARC) INSIDE GKE, because the formae agent is ClusterIP only.
+# Runs on the ARC runner scale set `formae-kcd` INSIDE GKE, because the formae agent is
+# ClusterIP only (connection: .github/actions/formae-agent). The CronJob calls
+# workflow_dispatch on this file name, so keep it reality-sync.yml.
 name: reality-sync
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # GitHub may start scheduled runs a few minutes late
+    - cron: "*/10 * * * *"   # GitHub may start scheduled runs late; the in-cluster CronJob is the real trigger
   workflow_dispatch:
 
 concurrency:
-  group: formae-agent
+  group: reality-sync
   cancel-in-progress: false
 
 permissions:
   contents: read
 
+env:
+  PROJECT_DIR: projects/kcd-2026
+  # Only out-of-band *updates* of these types are absorbed without a human.
+  ALLOWED_TYPES: >-
+    GCP::Storage::Bucket GCP::SQL::DatabaseInstance
+    K8S::Core::Namespace K8S::Core::ConfigMap K8S::Core::Service
+    K8S::Apps::Deployment K8S::Batch::CronJob
+    K8S::Autoscaling::HorizontalPodAutoscaler
+
 jobs:
+  stacks:
+    runs-on: formae-kcd
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/formae-agent
+        env:
+          FORMAE_SYNC_WAIT: "0"   # the sync job below waits; this one only lists stacks
+
+      # Every forma (folder with main.pkl) whose stack the agent knows. A forma
+      # that was never applied has nothing that can drift, so it is skipped.
+      - name: List formae with a stack on the agent
+        id: list
+        run: |
+          known=$(formae inventory stacks --config "$FORMAE_CONFIG" --max-results 0 \
+                    --output-consumer machine --output-schema json | jq -c '[.. | .Label? // empty]')
+          echo "stacks on the agent: $known"
+          matrix=$(for f in $(find "$PROJECT_DIR" -name main.pkl | sort); do
+                     label=$(formae eval --config "$FORMAE_CONFIG" --output-consumer machine --output-schema json "$f" \
+                               | jq -r '.Stacks[0].Label // empty') || continue
+                     [[ -n "$label" ]] && jq -n --arg n "$label" --arg f "$f" '{name: $n, file: $f}'
+                   done | jq -sc --argjson known "$known" 'map(select(.name as $n | $known | index($n)))')
+          echo "matrix: $matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   sync:
-    runs-on: formae-kcd          # ARC runner scale set name (setup/arc/runner-scale-set.yaml)
+    needs: stacks
+    if: needs.stacks.outputs.matrix != '[]'
+    runs-on: formae-kcd
     timeout-minutes: 15
     strategy:
       max-parallel: 1
+      fail-fast: false
       matrix:
-        stack:
-          - { name: kcd-demo-app, file: stacks/kcd-demo-app.pkl }
-    env:
-      FORMAE_USER: ${{ secrets.FORMAE_USER }}
-      FORMAE_PASSWORD: ${{ secrets.FORMAE_PASSWORD }}
+        stack: ${{ fromJSON(needs.stacks.outputs.matrix) }}
     steps:
       - name: GitHub App token (bot)
         id: app
@@ -43,15 +82,11 @@ jobs:
         with:
           token: ${{ steps.app.outputs.token }}
 
-      - name: formae profile for the in-cluster agent
-        run: ./scripts/write-ci-profile.sh
-
-      - name: Resolve Pkl dependencies
-        run: pkl project resolve
+      - uses: ./.github/actions/formae-agent
 
       - name: Detect and absorb drift
         id: sync
-        run: ./scripts/reality-sync.sh "${{ matrix.stack.file }}" "${{ matrix.stack.name }}"
+        run: .github/scripts/reality-sync.sh "${{ matrix.stack.file }}" "${{ matrix.stack.name }}"
 
       - name: Run summary
         if: always() && steps.sync.outputs.summary != ''
@@ -63,10 +98,11 @@ jobs:
         with:
           token: ${{ steps.app.outputs.token }}
           sign-commits: true
+          base: main
           branch: reality-sync/${{ matrix.stack.name }}
           delete-branch: true
           add-paths: ${{ matrix.stack.file }}
-          commit-message: "reality-sync(${{ matrix.stack.name }}): absorb drift observed in cluster"
+          commit-message: "reality-sync(${{ matrix.stack.name }}): absorb drift observed in the cloud"
           title: "reality-sync: drift absorbed in ${{ matrix.stack.name }}"
           body-path: ${{ steps.sync.outputs.summary }}
           labels: reality-sync
@@ -78,17 +114,14 @@ jobs:
           SUMMARY: ${{ steps.sync.outputs.summary }}
           STACK: ${{ matrix.stack.name }}
         run: |
-          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
-          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
           label="reality-sync-blocked"
           title="reality-sync BLOCKED: ${STACK}"
-          open=$(curl -fsS "${auth[@]}" "$api/issues?state=open&labels=${label}" \
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label "$label" --json title \
                  | jq --arg t "$title" '[.[] | select(.title == $t)] | length')
           if [ "$open" -gt 0 ]; then
             echo "An Issue for ${STACK} is still open, not creating another one."
             exit 0
           fi
-          jq -n --arg t "$title" --rawfile b "$SUMMARY" --arg l "$label" \
-             '{title: $t, body: $b, labels: [$l]}' \
-          | curl -fsS "${auth[@]}" -X POST "$api/issues" -d @- > /dev/null
+          gh label create "$label" -R "$GITHUB_REPOSITORY" --color B60205 2>/dev/null || true
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$SUMMARY" --label "$label"
           echo "Issue created."
