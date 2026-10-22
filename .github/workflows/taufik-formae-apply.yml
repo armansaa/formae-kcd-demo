@@ -14,7 +14,8 @@ name: "formae apply: kcd-2026"
 # issue_comment workflows always run the workflow file from the default
 # branch, so changes to this file only take effect once merged to main.
 #
-# Guards: commenter has write access, PR is open, approved, from this repo,
+# Guards: commenter has write access, PR is open, approved (the repo owner may
+# apply without an approval), no change requests, from this repo,
 # and every forma's fresh plan is free of drift (reality wins: update the
 # code first, see formae-scan-report.sh).
 
@@ -71,6 +72,7 @@ jobs:
         id: pr
         env:
           ACTOR: ${{ github.event.comment.user.login }}
+          REPO_OWNER: ${{ github.repository_owner }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
@@ -90,7 +92,12 @@ jobs:
           [[ $(jq -r .baseRefName <<<"$info") == main ]] || fail "PR must target main."
           approved=$(jq '[.latestReviews[] | select(.state == "APPROVED")] | length' <<<"$info")
           blocked=$(jq '[.latestReviews[] | select(.state == "CHANGES_REQUESTED")] | length' <<<"$info")
-          (( approved > 0 && blocked == 0 )) || fail "PR needs an approval and no outstanding change requests."
+          (( blocked == 0 )) || fail "PR has outstanding change requests."
+          # The repo owner may apply without a second approval (GitHub doesn't let a PR author
+          # approve their own PR). Everyone else needs one.
+          if [[ "$ACTOR" != "$REPO_OWNER" ]]; then
+            (( approved > 0 )) || fail "PR needs an approval (only the repo owner may apply without one)."
+          fi
 
           # Command: first line only, `formae apply [-d <dir>]...` (checked out
           # below, so read the parser from the API).
