@@ -86,7 +86,7 @@ Nobody approves drift before it is absorbed, so these rules are the only brakes:
 | `setup/arc/reality-sync-trigger.yaml` | In-cluster CronJob that dispatches `reality-sync` every 10 minutes |
 | `projects/kcd-2026/<kind>/<name>/main.pkl` | Second set of formae (bucket, Cloud SQL, the `mario` app), one stack per folder, managed by a second agent in namespace `formae-kcd` |
 | `.github/workflows/taufik-formae-*.yml`, `.github/scripts/formae-*.sh` | Atlantis-style flow for `projects/`: plan on every PR, then `formae plan` / `formae apply [-d <dir>]` / `formae import` as PR comments |
-| `.github/workflows/reality-sync-kcd-2026.yml`, `.github/scripts/reality-sync.sh` | The same reality-sync loop for `projects/` (Cloud SQL and bucket stacks are skipped) |
+| `.github/workflows/reality-sync-kcd-2026.yml`, `.github/scripts/reality-sync.sh` | The same reality-sync loop for `projects/`; `.github/scripts/formae-extract-desired.sh` writes the absorbed state back |
 | `.github/actions/formae-agent/` | CLI connection to the agent in namespace `formae-kcd` |
 | `setup/arc/reality-sync-trigger-kcd-2026.yaml` | CronJob that dispatches `reality-sync-kcd-2026` every 10 minutes |
 

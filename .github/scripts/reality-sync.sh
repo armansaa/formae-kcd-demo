@@ -75,7 +75,7 @@ if ! jq -e '.data.ObservationID // empty' "$OUT/simulate.json" > /dev/null 2>&1;
 fi
 
 cp "$STACK_FILE" "$OUT/original.pkl"
-formae extract --desired --yes --config "$FORMAE_CONFIG" --query "stack:${STACK}" "$OUT/desired.pkl"
+"$(dirname "$0")/formae-extract-desired.sh" "$STACK" "$OUT/desired.pkl"
 cp "$OUT/desired.pkl" "$STACK_FILE"
 set +e
 formae_m apply --mode reconcile --simulate "$STACK_FILE" > "$OUT/simulate.json" 2> "$OUT/simulate.err"
@@ -181,9 +181,11 @@ done
 [[ "$state" == "Success" ]] || { echo "Timed out waiting for $CMD_ID (state=$state)" >&2; finish error 1; }
 
 # ---------- 4. write the desired state back to the file ----------
-# If extract fails (e.g. a field outside the plugin schema, see the Cloud SQL findings), the run
-# stops as an error: the agent has absorbed, Git has not. A human has to look at it.
-formae extract --desired --yes --config "$FORMAE_CONFIG" --query "stack:${STACK}" "$OUT/extracted.pkl"
+# formae-extract-desired.sh instead of `formae extract --desired`: the plain command fails on
+# fields outside the plugin schema, Resolvables and stack labels with "/" (see the script).
+# If it still fails, the run stops as an error: the agent has absorbed, Git has not. A human
+# has to look at it.
+"$(dirname "$0")/formae-extract-desired.sh" "$STACK" "$OUT/extracted.pkl"
 cp "$OUT/extracted.pkl" "$STACK_FILE"
 rm -f "$OUT/original.pkl"
 

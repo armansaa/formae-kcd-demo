@@ -26,11 +26,6 @@ permissions:
 
 env:
   PROJECT_DIR: projects/kcd-2026
-  # Stacks left out of the loop. Cloud SQL is one-way (every update is refused by the GCP
-  # plugin and extract fails on fields missing from the schema), and extract of the bucket
-  # stack currently fails the same way.
-  SKIP_STACKS: >-
-    kcd-2026/bucket/formae-demo kcd-2026/cloudsql/cloudsql-demo
   # Only out-of-band *updates* of these types are absorbed without a human.
   ALLOWED_TYPES: >-
     GCP::Storage::Bucket GCP::SQL::DatabaseInstance
@@ -62,8 +57,7 @@ jobs:
                      label=$(formae eval --config "$FORMAE_CONFIG" --output-consumer machine --output-schema json "$f" \
                                | jq -r '.Stacks[0].Label // empty') || continue
                      [[ -n "$label" ]] && jq -n --arg n "$label" --arg f "$f" '{name: $n, file: $f}'
-                   done | jq -sc --argjson known "$known" --arg skip "$SKIP_STACKS" \
-                     'map(select(.name as $n | ($known | index($n)) and ($skip | split(" ") | index($n) | not)))')
+                   done | jq -sc --argjson known "$known" 'map(select(.name as $n | $known | index($n)))')
           echo "matrix: $matrix"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
