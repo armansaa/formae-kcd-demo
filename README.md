@@ -17,7 +17,7 @@ one layout: every stack is a folder under `projects/kcd-2026/`.
 
 ```
 PR that changes a forma ──▶ plan posted as a PR comment (formae plan: kcd-2026)
-                            ├─ approve (someone other than the author)
+                            ├─ approve (someone other than the author; the repo owner may skip it)
                             ├─ comment `formae apply [-d <dir>]`   the agent makes it real
                             ├─ comment `formae plan [-d <dir>]`    must show no changes
                             └─ merge
@@ -74,8 +74,8 @@ Nobody approves drift before it is absorbed, so these rules are the only brakes:
    API problem, not a human decision. The run stops and opens an Issue.
 3. **Type allowlist** (env `ALLOWED_TYPES` in `reality-sync.yml`). One blocked resource stops the
    run for that stack, because formae takes a single resolution for all drifted resources.
-4. **reality-sync never applies code.** Code reaches the cloud only through an approved PR and a
-   `formae apply` comment.
+4. **reality-sync never applies code.** Code reaches the cloud only through a PR and a
+   `formae apply` comment (approved, unless the repo owner applies it).
 5. **No fork PRs on the self-hosted runner.** `formae apply` refuses PRs from forks, and
    *Require approval for all outside collaborators* must be on.
 6. **No Kubernetes Secrets in a forma.** reality-sync writes live state into Git.
