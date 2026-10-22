@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: formae-kcd
+resources:
+- namespace.yaml
+# Rendered from the formae-helm chart, see ../values.yaml.
+- formae.yaml
+patches:
+# SQLite lives on a ReadWriteOnce PVC; a rolling update would start the new
+# pod before the old one releases the volume (and two agents must never share
+# one SQLite file).
+- target:
+    kind: Deployment
+    name: formae
+  patch: |-
+    - op: add
+      path: /spec/strategy
+      value:
+        type: Recreate

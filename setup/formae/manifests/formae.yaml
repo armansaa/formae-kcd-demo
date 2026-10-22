@@ -1,0 +1,241 @@
+---
+# Source: formae/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: formae
+  labels:
+    helm.sh/chart: formae-0.88.1
+    app.kubernetes.io/name: formae
+    app.kubernetes.io/instance: formae
+    app.kubernetes.io/version: "0.88.1"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    iam.gke.io/gcp-service-account: formae-agent@kcd-2026.iam.gserviceaccount.com
+automountServiceAccountToken: true
+---
+# Source: formae/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: formae-config
+  labels:
+    helm.sh/chart: formae-0.88.1
+    app.kubernetes.io/name: formae
+    app.kubernetes.io/instance: formae
+    app.kubernetes.io/version: "0.88.1"
+    app.kubernetes.io/managed-by: Helm
+data:
+  formae.conf.pkl: |
+    amends "formae:/Config.pkl"
+
+    agent {
+      server {
+        port = 49684
+      }
+
+      datastore {
+        datastoreType = "sqlite"
+        sqlite {
+          filePath = "/data/formae.db"
+        }
+      }
+
+      logging {
+        consoleLogLevel = "info"
+        fileLogLevel = "info"
+      }
+
+      synchronization {
+        enabled = true
+        interval = 5.min
+      }
+
+      discovery {
+        enabled = true
+        interval = 30.min
+        resourceTypesToDiscover {
+          "GCP::Container::Cluster"
+          "GCP::SQL::DatabaseInstance"
+          "GCP::Storage::Bucket"
+        }
+      }
+
+      retry {
+        statusCheckInterval = 20.s
+        maxRetries = 9
+        retryDelay = 10.s
+      }
+      auth {
+        type = "auth-basic"
+        authorizedUsers = new Listing {
+          new Mapping {
+            ["Username"] = read("env:FORMAE_AUTH_USERNAME")
+            ["Password"] = read("env:FORMAE_AUTH_PASSWORD")
+          }
+        }
+      }
+    }
+
+    cli {
+      disableUsageReporting = true
+    }
+    pluginDir = "/opt/pel/formae/plugins"
+---
+# Source: formae/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: formae-data
+  labels:
+    helm.sh/chart: formae-0.88.1
+    app.kubernetes.io/name: formae
+    app.kubernetes.io/instance: formae
+    app.kubernetes.io/version: "0.88.1"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Source: formae/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: formae
+  labels:
+    helm.sh/chart: formae-0.88.1
+    app.kubernetes.io/name: formae
+    app.kubernetes.io/instance: formae
+    app.kubernetes.io/version: "0.88.1"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: 49684
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: formae
+    app.kubernetes.io/instance: formae
+    ## Without the component label this Service also matches the PostgreSQL
+    ## pod, which carries the same name/instance labels — half the API traffic
+    ## would be routed to PostgreSQL.
+    app.kubernetes.io/component: agent
+---
+# Source: formae/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: formae
+  labels:
+    helm.sh/chart: formae-0.88.1
+    app.kubernetes.io/name: formae
+    app.kubernetes.io/instance: formae
+    app.kubernetes.io/version: "0.88.1"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: formae
+      app.kubernetes.io/instance: formae
+  template:
+    metadata:
+      annotations:
+        checksum/config: 63202fc17470bc093c07ac6e2b79b6447e5d77df646c75fea4d2a513ead7f15d
+      labels:
+        helm.sh/chart: formae-0.88.1
+        app.kubernetes.io/name: formae
+        app.kubernetes.io/instance: formae
+        app.kubernetes.io/version: "0.88.1"
+        app.kubernetes.io/managed-by: Helm
+        ## Distinguishes agent pods from the PostgreSQL pod. Not in
+        ## spec.selector, which is immutable on existing releases.
+        app.kubernetes.io/component: agent
+    spec:
+      serviceAccountName: formae
+      securityContext:
+        fsGroup: 1001
+        runAsGroup: 1001
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: formae
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
+          image: ghcr.io/platform-engineering-labs/formae:0.90.5
+          imagePullPolicy: IfNotPresent
+          command:
+            - formae
+            - agent
+            - start
+            - --config
+            - /config/formae.conf.pkl
+          ports:
+            - name: http
+              containerPort: 49684
+              protocol: TCP
+          env:
+            - name: FORMAE_AUTH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: formae-auth
+                  key: username
+            - name: FORMAE_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: formae-auth
+                  key: password
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - mountPath: /opt/pel/formae/plugins/aws
+              name: no-plugin
+              readOnly: true
+            - mountPath: /opt/pel/formae/plugins/azure
+              name: no-plugin
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: formae-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: formae-data
+        - emptyDir: {}
+          name: no-plugin

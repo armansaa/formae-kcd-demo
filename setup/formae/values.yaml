@@ -1,0 +1,89 @@
+# Values for the formae agent chart, rendered into ./manifests/formae.yaml.
+#
+# Chart: https://github.com/platform-engineering-labs/formae-helm
+#   pinned commit e60274569375a9acaa4bf92443321500228e75dd (chart 0.88.1)
+#
+# Re-render after changing this file:
+#   git clone https://github.com/platform-engineering-labs/formae-helm /tmp/formae-helm
+#   git -C /tmp/formae-helm checkout e60274569375a9acaa4bf92443321500228e75dd
+#   helm template formae /tmp/formae-helm --namespace formae-kcd --skip-tests \
+#     -f values.yaml > manifests/formae.yaml
+
+image:
+  # Keep in step with the formae CLI used by CI / laptops.
+  tag: "0.90.5"
+
+serviceAccount:
+  name: formae
+  annotations:
+    iam.gke.io/gcp-service-account: formae-agent@kcd-2026.iam.gserviceaccount.com
+
+formae:
+  # Single agent -> SQLite on a PVC is enough; switch to postgres for HA.
+  datastore:
+    type: sqlite
+    sqlite:
+      filePath: /data/formae.db
+
+  # Resources are always created from IaC first; the agent only keeps the
+  # stacks it manages in sync with reality (synchronization, on by default).
+  # No discovery of unmanaged resources.
+  discovery:
+    # Every 30 minutes (and on demand: POST /api/v1/admin/discover, used by
+    # `formae import`), read-only: lists these types on every discoverable
+    # target as unmanaged resources (stack `$unmanaged`, label = cloud name).
+    #   - GKE clusters: k8s targets resolve their endpoint and CA from them
+    #     (modules/resources/k8s/gke.pkl), so no IP/CA is written in a forma.
+    #     A project's clusters are found once a GCP target for that project is
+    #     registered (any applied GCP forma, e.g. a bucket).
+    #   - Cloud SQL / buckets: so `formae import` can adopt existing ones.
+    enabled: true
+    interval: 30.min
+    resourceTypesToDiscover:
+      - GCP::Container::Cluster
+      - GCP::SQL::DatabaseInstance
+      - GCP::Storage::Bucket
+
+  # The ClusterIP is reachable from every pod in the cluster (incl. shared
+  # GitHub runners), so require auth. Secret formae-auth is created with kubectl (setup/formae/README.md).
+  auth:
+    enabled: true
+    basic:
+      existingSecret: formae-auth
+      usernameKey: username
+      passwordKey: password
+
+postgresql:
+  enabled: false
+
+persistence:
+  enabled: true
+  size: 1Gi
+
+grafana:
+  dashboards:
+    enabled: false
+
+# Every plugin under /opt/pel/formae/plugins runs as its own process in this
+# container, and `resourcePlugins { enabled = false }` only rejects the
+# registration — the process still starts. With aws+azure+gcp+k8s the pod was
+# OOMKilled at 1Gi, so hide the plugins we don't use (aws, azure) behind empty dirs.
+extraVolumes:
+  - name: no-plugin
+    emptyDir: {}
+extraVolumeMounts:
+  - name: no-plugin
+    mountPath: /opt/pel/formae/plugins/aws
+    readOnly: true
+  - name: no-plugin
+    mountPath: /opt/pel/formae/plugins/azure
+    readOnly: true
+  # k8s stays enabled: formae manages Kubernetes objects too (formae under
+  # projects/kcd-2026/), reaching GKE with GKEAuth as the GSA (project Owner).
+
+resources:
+  requests:
+    memory: 1Gi
+    cpu: 500m
+  limits:
+    memory: 2Gi

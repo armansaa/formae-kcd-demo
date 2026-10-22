@@ -5,51 +5,65 @@ Demo for the talk **"Beyond One-Way GitOps: Detecting and Reconciling Infrastruc
 
 GitOps normally flows one way: Git → cluster. During an incident people still `kubectl edit`,
 and Git silently falls behind. This repo uses [formae](https://formae.io) to run the other
-direction, **reality → Git**: out-of-band changes are detected, absorbed as desired state, and a
-bot opens a PR so Git matches the cluster again.
+direction too, **reality → Git**: out-of-band changes are detected, absorbed as desired state, and
+a bot opens a PR so Git matches the cloud again.
+
+One formae agent (namespace `formae-kcd` in GKE `gke-research-lab`, project `kcd-2026`), one flow,
+one layout: every stack is a folder under `projects/kcd-2026/`.
 
 ## How it works
+
+**Code → cloud (planned changes), Atlantis-style:**
+
+```
+PR that changes a forma ──▶ plan posted as a PR comment (formae plan: kcd-2026)
+                            ├─ approve (someone other than the author; the repo owner may skip it)
+                            ├─ comment `formae apply [-d <dir>]`   the agent makes it real
+                            ├─ comment `formae plan [-d <dir>]`    must show no changes
+                            └─ merge
+```
+
+`formae import [-d <dir>]` adopts a resource that already exists in the cloud instead of
+creating it. Removing a forma folder in a PR and commenting `formae apply -d <dir>` destroys its
+resources.
+
+**Cloud → code (what really happened):**
 
 ```
  kubectl / console                formae agent (GKE)               GitHub
  ─────────────────                ──────────────────               ──────
- edit ConfigMap  ──────────────▶  sync every 10 minutes
-                                  "drift: PROMO_ENABLED
-                                   false → true"
+ change a resource ─────────────▶ sync every 5 minutes
+                                  "drift: limits.memory
+                                   64Mi → 256Mi"
                                          │
                   reality-sync (every 10 minutes, ARC runner in GKE)
                                          │
                                   passes guardrails?
-                                   ├─ yes → absorb (--resolution)
-                                   │        extract --desired ─────▶  PR "reality-sync: …"
-                                   │                                  verify check: Git = reality
+                                   ├─ yes → absorb, write the stack file back ─▶ PR "reality-sync: …"
                                    └─ no (delete/create, type outside the allowlist)
-                                            changes nothing ───────▶  Issue "BLOCKED"
+                                            changes nothing ──────────────────▶ Issue "BLOCKED"
 ```
 
-The other direction is ordinary GitOps: merge a change to `main` and the **apply** workflow
-pushes it to the cluster (code wins). It simulates first, does nothing when the agent already
-matches, and stops without applying when there is drift nobody has decided on yet.
+Merging the bot's PR makes Git record reality. The plan on that PR should show no changes.
 
-## Demo: a promo switched on without a PR
+## Demo stacks
+
+| Forma | What it is |
+|---|---|
+| `projects/kcd-2026/kube-manifest/promo` | Namespace `kcd-demo`: ConfigMap `promo-config` read by `promo-api`, and `promo-worker`, which is OOMKilled at a 64Mi memory limit |
+| `projects/kcd-2026/kube-manifest/mario` | A small web app in namespace `mario`, with a Service and an HPA |
+| `projects/kcd-2026/bucket/formae-demo` | A GCS bucket |
+| `projects/kcd-2026/cloudsql/cloudsql-demo` | A Cloud SQL instance (one-way, see Known limitations) |
+
+Example: the 02:14 hotfix. `promo-worker` crashes with exit code 137; someone raises the limit
+directly in the cluster:
 
 ```bash
-kubectl -n kcd-demo patch configmap promo-config \
-  --type merge -p '{"data":{"PROMO_ENABLED":"true","DISCOUNT_PCT":"25"}}'
-kubectl -n kcd-demo delete pod -l app=promo-api
+kubectl -n kcd-demo set resources deploy/promo-worker --limits=memory=256Mi
 ```
 
-Deleting the pod makes the app pick up the new values without touching the Deployment. A
-`rollout restart` would also work, but it stamps a `restartedAt` annotation on the Deployment,
-which is a second out-of-band change.
-
-Wait for the agent's sync (up to 10 minutes), then run the **reality-sync** workflow or wait for
-the next trigger. It opens a PR `reality-sync: drift absorbed in kcd-demo-app` with a two-key diff in
-`stacks/kcd-demo-app.pkl` and a green `verify` check.
-
-- **Merge** the PR: Git now matches reality.
-- **Close** the PR, then run the **apply** workflow (Actions → apply → Run workflow): code wins
-  and the change is rolled back.
+After the next sync and reality-sync run, the bot opens a PR whose Before/After table shows the
+memory limit going from 64Mi to 256Mi.
 
 ## Guardrails
 
@@ -58,101 +72,66 @@ Nobody approves drift before it is absorbed, so these rules are the only brakes:
 1. **Soft reconcile only.** Never `--force`, never `--mode patch`.
 2. **Deletions and creations are never absorbed.** A missing resource can be a permissions or
    API problem, not a human decision. The run stops and opens an Issue.
-3. **Type allowlist** (env `ALLOWED_TYPES`): `K8S::Core::ConfigMap`, `K8S::Apps::Deployment`,
-   `K8S::Batch::CronJob`. One blocked resource stops the whole run, because formae takes a
-   single resolution for all drifted resources.
-4. **reality-sync never applies code.** If `main` differs from the agent without drift (for
-   example after a closed bot PR), the run only records `code-differs`. Code reaches the cluster
-   only through the `apply` workflow: on a push to `main` that touches `stacks/`, or by hand.
-   Both workflows share one concurrency group, so they never talk to the agent at the same time.
-5. **No fork PRs on the self-hosted runner.** PR workflows don't run for forks, and *Require
-   approval for all outside collaborators* must be on.
-6. **No Kubernetes Secrets in the stack.** reality-sync writes live state into Git.
+3. **Type allowlist** (env `ALLOWED_TYPES` in `reality-sync.yml`). One blocked resource stops the
+   run for that stack, because formae takes a single resolution for all drifted resources.
+4. **reality-sync never applies code.** Code reaches the cloud only through a PR and a
+   `formae apply` comment (approved, unless the repo owner applies it).
+5. **No fork PRs on the self-hosted runner.** `formae apply` refuses PRs from forks, and
+   *Require approval for all outside collaborators* must be on.
+6. **No Kubernetes Secrets in a forma.** reality-sync writes live state into Git.
 
 ## Repo layout
 
 | Path | Contents |
 |---|---|
-| `stacks/*.pkl` | One file per stack, generated by `formae extract --desired`. The bot overwrites them |
-| `scripts/reality-sync.sh` | Detect drift → guardrails → absorb → write back. Also runs by hand |
-| `scripts/write-ci-profile.sh` | CLI profile `ci`, pointing at the agent Service inside the cluster |
-| `.github/workflows/reality-sync.yml` | Triggered every 10 minutes or manually. Opens a PR or an Issue |
-| `.github/workflows/apply.yml`, `scripts/apply-stack.sh` | On a push to `main`: apply the stacks to the cluster (code wins), soft reconcile only |
-| `scripts/render-changes.sh` | Before/After table used in PR, Issue and run summaries |
-| `.github/workflows/verify.yml` | PR check: simulates the stacks; bot PRs must show "no changes" |
-| `.github/workflows/build-runner-image.yml`, `runner/Dockerfile` | Runner image (actions-runner + formae + pkl + jq), pushed to GHCR |
-| `setup/kcd-demo-namespace-rbac.yaml` | Demo namespace and write access for the agent |
+| `projects/kcd-2026/<kind>/<name>/main.pkl` | One stack per folder: stack, target and resources in one raw Pkl file (same shape as `formae extract`). Labels: stack `kcd-2026/<kind>/<name>`, target `kcd-2026/<cluster>` |
+| `.github/workflows/taufik-formae-scan.yml` | Plan on every PR and push that touches a forma; hourly drift scan of every forma |
+| `.github/workflows/taufik-formae-{comment-plan,apply,import}.yml` | `formae plan`, `formae apply`, `formae import` as PR comments |
+| `.github/workflows/reality-sync.yml`, `.github/scripts/reality-sync.sh` | Detect drift → guardrails → absorb → write the stack back (`formae-extract-desired.sh`) → PR or Issue |
+| `.github/scripts/formae-*.sh` | Plan, apply, import and report logic for the workflows |
+| `.github/actions/formae-agent/` | CLI connection to the agent Service inside the cluster |
+| `.github/workflows/build-runner-image.yml`, `runner/Dockerfile` | Runner image (actions-runner + formae + pkl + jq + gh), pushed to GHCR |
+| `setup/formae/` | The formae agent: Helm values and rendered manifests (`kubectl apply -k`) |
 | `setup/arc/runner-scale-set.yaml` | ARC values for the `formae-kcd` runner scale set |
 | `setup/arc/reality-sync-trigger.yaml` | In-cluster CronJob that dispatches `reality-sync` every 10 minutes |
-| `projects/kcd-2026/<kind>/<name>/main.pkl` | Second set of formae (bucket, Cloud SQL, the `mario` app), one stack per folder, managed by a second agent in namespace `formae-kcd` |
-| `.github/workflows/taufik-formae-*.yml`, `.github/scripts/formae-*.sh` | Atlantis-style flow for `projects/`: plan on every PR, then `formae plan` / `formae apply [-d <dir>]` / `formae import` as PR comments |
-| `.github/workflows/reality-sync-kcd-2026.yml`, `.github/scripts/reality-sync.sh` | The same reality-sync loop for `projects/`; `.github/scripts/formae-extract-desired.sh` writes the absorbed state back |
-| `.github/actions/formae-agent/` | CLI connection to the agent in namespace `formae-kcd` |
-| `setup/arc/reality-sync-trigger-kcd-2026.yaml` | CronJob that dispatches `reality-sync-kcd-2026` every 10 minutes |
-
-### Two agents, one repo
-
-`stacks/` is applied on merge to the agent in namespace `formae`. `projects/kcd-2026/` goes through
-PR comments to the agent in namespace `formae-kcd`. Both run in the same GKE cluster and share one
-runner scale set (`formae-kcd`); a runner pod carries the credentials of both agents. Keep each stack
-in one place: never declare the same resource under both `stacks/` and `projects/`.
 
 ## Tested with formae 0.90.5 on GKE 1.35
 
 - **Discovery** through `GKEAuth` + Workload Identity: existing cluster objects show up as
   `unmanaged`.
-- **Deploy** of the `kcd-demo-app` stack (ConfigMap + Deployment), with write access only in
-  the `kcd-demo` namespace.
 - **`extract --desired`** round-trips: applying its output gives "No changes needed".
-- **Drift** from a `kubectl` change is reported as exactly the two changed keys.
+- **Drift** from a `kubectl` change to a ConfigMap is reported as exactly the changed keys.
 - **Revert** (code wins) restores the ConfigMap and patches only the declared fields.
-- **Absorb** (reality wins) followed by extract gives a diff of exactly the two changed keys.
-- **Deployment drift** (memory limit raised with `kubectl set resources`) is absorbed and
-  verified, but the extract is wider than the change: it also records the `restartedAt`
-  annotation left by an earlier `rollout restart`, the default `strategy` block and an empty
-  `securityContext`. Once `restartedAt` is in the stack file, every later `rollout restart`
-  counts as drift.
-
-Cloud SQL is deliberately left out. With GCP plugin 0.1.18, `GCP::SQL::DatabaseInstance` does
-not support updates, and extract fails after absorb because of a field outside the schema.
+- **Absorb** (reality wins) followed by extract gives a diff of exactly the changed keys.
+- **Deployment drift** (memory limit raised with `kubectl set resources`) is absorbed. The extract
+  also records fields the code left out (the default `strategy`, an empty `securityContext`, a
+  `restartedAt` annotation from an earlier `rollout restart`), so the `promo` forma declares those
+  defaults up front.
+- **A key added to a ConfigMap** by someone else is not drift: formae owns only the keys the code
+  declares.
 
 ## Run it yourself
 
-You need a Kubernetes cluster running the formae agent 0.90.5 (Helm install, Service
-`formae.formae.svc:49684`, basic auth) and a laptop where `formae agent status --profile gke-kcd`
-works. Replace `armansaa` in the two files under `setup/arc/` with your GitHub account.
+You need a GKE cluster, a GCP service account for the agent (with the roles your formae need and
+Workload Identity for the KSA `formae-kcd/formae`), and a GitHub App for the bot. Replace
+`armansaa` in the files under `setup/arc/` with your GitHub account.
 
-**1. Create a GitHub App for the bot.** Settings → Developer settings → GitHub Apps → New GitHub
-App. Turn the webhook off and allow installation only on your account. Repository permissions:
-Contents, Pull requests, Issues, Actions and Administration, all **Read and write** (ARC uses
-Administration to register runners; the trigger CronJob uses Actions to dispatch the workflow). Then generate a private key (`.pem`), install the App on
-this repo only, and note the **App ID** and the **Installation ID** (the number at the end of the
-installation page URL).
+**1. GitHub App.** Settings → Developer settings → GitHub Apps → New GitHub App. Webhook off,
+installable only on your account. Repository permissions, all **Read and write**: Contents, Pull
+requests, Issues, Actions, Administration (ARC registers runners with it; the trigger CronJob
+dispatches the workflow with Actions). Generate a private key, install the App on this repo only,
+note the **App ID** and the **Installation ID**.
 
-**2. Prepare the cluster and the stack.**
+**2. Agent.** See [`setup/formae/README.md`](setup/formae/README.md).
 
-```bash
-kubectl apply -f setup/kcd-demo-namespace-rbac.yaml
-formae apply --mode reconcile --profile gke-kcd stacks/kcd-demo-app.pkl
-```
+**3. Repo settings.** Settings → Secrets and variables → Actions: variable `APP_ID`, secret
+`APP_PRIVATE_KEY` (the `.pem`). Settings → Actions → General: fork pull request workflows
+**Require approval for all outside collaborators**.
 
-**3. Push the repo and publish the runner image.** The first push runs `build-runner-image`.
-When it finishes, set the `formae-kcd-runner` package visibility to **Public** so the cluster
-can pull it without credentials.
+**4. Runner image.** The first push runs `build-runner-image`. Set the `formae-kcd-runner` package
+visibility to **Public** so the cluster can pull it.
 
-**4. Configure the repo.** Under Settings → Secrets and variables → Actions:
-
-| Kind | Name | Value |
-|---|---|---|
-| Variable | `APP_ID` | App ID from step 1 |
-| Secret | `APP_PRIVATE_KEY` | Full contents of the `.pem` file |
-| Secret | `FORMAE_USER` | Agent basic auth username |
-| Secret | `FORMAE_PASSWORD` | Agent password in plain text, not the bcrypt hash |
-
-Under Settings → Actions → General, set fork pull request workflows to **Require approval for
-all outside collaborators**.
-
-**5. Install Actions Runner Controller.**
+**5. Actions Runner Controller and the trigger.**
 
 ```bash
 helm install arc -n arc-systems --create-namespace \
@@ -163,34 +142,32 @@ kubectl -n arc-runners create secret generic arc-github-app \
   --from-literal=github_app_id=<APP_ID> \
   --from-literal=github_app_installation_id=<INSTALLATION_ID> \
   --from-file=github_app_private_key=<path/to/key.pem>
+# basic auth of the agent, in plain text (the agent itself stores the bcrypt hash)
+kubectl -n arc-runners create secret generic formae-kcd-agent-auth \
+  --from-literal=username=formae --from-literal=password='<password>'
 
-helm install formae-kcd -n arc-runners -f setup/arc/runner-scale-set.yaml \
-  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
-```
-
-The controller and the `formae-kcd` listener must be Running in `arc-systems`, and the runner
-appears under Settings → Actions → Runners.
-
-Then install the trigger. GitHub's own `schedule` is best effort (in this repo a `*/10` cron
-fired only a few times a day), so a CronJob in the cluster dispatches the workflow instead. It
-reuses the `arc-github-app` Secret:
-
-```bash
+helm upgrade --install formae-kcd -n arc-runners -f setup/arc/runner-scale-set.yaml \
+  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set --version 0.15.0
 kubectl apply -f setup/arc/reality-sync-trigger.yaml
 ```
 
-**6. Run it once.** Actions → **reality-sync** → Run workflow. Expected summary: "clean, no
-drift".
+GitHub's own `schedule` is best effort (a `*/10` cron fired only a few times a day here), so the
+CronJob dispatches `reality-sync` from inside the cluster.
+
+**6. First stack.** Open a PR with a forma, comment `formae apply` after approval, then
+`formae plan` (no changes), merge. Actions → **reality-sync** → Run workflow should report clean.
 
 ## Known limitations
 
-- **Latency.** The agent syncs every 10 minutes and the trigger fires every 10 minutes, so a
-  change can take up to 20 minutes to reach a PR. Use *Run workflow* to skip the second wait.
-- **New resources are not in the loop yet.** A CronJob created with `kubectl` is not adopted.
-  Next step: discovery → allowlist → adopt → PR.
-- **Container fields are not applied from code.** With formae 0.90.5, changing a field inside a
-  Deployment's `containers` list in Git (for example `limits.memory`) produces no planned change,
-  so the apply workflow leaves it alone. Fields outside the list (such as `replicas`) and
-  ConfigMap values are applied. Drift in the other direction is still detected and absorbed.
-- **`stacks/` is generated code.** Manual edits through a PR are fine, but the bot overwrites
-  them with `extract --desired` output after the next drift.
+- **Latency.** The agent syncs every 5 minutes and the trigger fires every 10 minutes, so a change
+  can take up to 15 minutes to reach a PR. Use *Run workflow* to skip the second wait.
+- **New resources are not adopted automatically.** A resource created outside the code is not
+  drift; once discovery lists it as `managed:false`, a human decides whether to import it into a
+  forma or delete it.
+- **Container fields from code.** The k8s plugin (0.1.13) hides changes to
+  `containers[].resources` from the diff. The `promo` and `mario` formae work around it with a
+  subclass that redeclares the field.
+- **Cloud SQL is one-way.** With GCP plugin 0.1.18 every `GCP::SQL::*` update is refused before
+  any API call, so a revert to Cloud SQL is not possible; reality → Git still works.
+- **Stack files are partly generated.** Manual edits through a PR are fine, but reality-sync
+  rewrites the file after the next absorbed drift.
