@@ -20,7 +20,7 @@ body=$(mktemp)
   echo "---"
   echo "Planned at ${head_sha:0:7}. Comment:"
   echo
-  echo "- \`formae apply -d $forma\` — apply only this forma (needs an approval)"
+  echo "- \`formae apply -d $forma\` — apply only this forma (needs an approval, except from the repo owner)"
   echo "- \`formae apply\` — apply every forma in this PR"
   echo "- \`formae plan -d $forma\` / \`formae plan\` — plan again, e.g. after an apply to confirm there are no changes left"
   echo "- \`formae import -d $forma\` — a resource shown as \`create\` already exists in the cloud? Adopt it instead of creating a duplicate"
