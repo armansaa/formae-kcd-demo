@@ -1,0 +1,75 @@
+/*
+ * Cloud SQL Postgres cloudsql-demo. Raw forma: stack, target and resource in
+ * this one file (same shape as `formae extract`), no shared modules.
+ *
+ * One stack per forma folder: a reconcile apply deletes any resource in the
+ * stack that this file does not declare, so don't reuse the stack label.
+ * Labels: stack = <project>/<forma folder>, target = <project>.
+ */
+extends "@formae/forma.pkl"
+import "@formae/formae.pkl"
+import "@gcp/gcp.pkl"
+import "@gcp/sql/database.pkl"
+
+forma {
+  new formae.Stack {
+    label = "kcd-2026/cloudsql/cloudsql-demo"
+    description = "Cloud SQL cloudsql-demo for kcd-2026"
+  }
+
+  new formae.Target {
+    label = "kcd-2026"
+    config = new gcp.Config {
+      project = "kcd-2026"
+      region = "asia-southeast2"
+    }
+  }
+
+  new database.DatabaseInstance {
+    label = "cloudsql-demo"
+    project = "kcd-2026"
+    name = "cloudsql-demo"
+    databaseVersion = "POSTGRES_18"
+    region = "asia-southeast2"
+    settings = new database.Settings {
+      tier = "db-f1-micro"
+      availabilityType = "ZONAL"
+      edition = "ENTERPRISE"
+      dataDiskType = "PD_SSD"
+      storageAutoResize = true
+      deletionProtectionEnabled = true
+      userLabels {
+        ["project"] = "kcd-2026"
+        ["component"] = "cloudsql-demo"
+        ["environment"] = "stg"
+      }
+      // Public IP tanpa authorized networks: tidak ada IP luar yang boleh masuk;
+      // akses lewat Cloud SQL Auth Proxy / connector (IAM). Private IP di VPC
+      // `default` kcd-2026 butuh private service access (peering servicenetworking)
+      // yang belum ada; kalau sudah, ganti dengan:
+      //   ipv4Enabled    = false
+      //   privateNetwork = "https://www.googleapis.com/compute/v1/projects/kcd-2026/global/networks/default"
+      ipConfiguration = new database.IpConfiguration {
+        ipv4Enabled = true
+        authorizedNetworks {}
+      }
+      backupConfiguration = new database.BackupConfiguration {
+        enabled = true
+        pointInTimeRecoveryEnabled = true
+        startTime = "08:00"
+        transactionLogRetentionDays = 7
+      }
+      maintenanceWindow = new database.MaintenanceWindow {
+        day = 6
+        hour = 18
+        updateTrack = "stable"
+      }
+      databaseFlags {
+        new { name = "max_connections"; value = "100" }
+        new { name = "cloudsql.iam_authentication"; value = "on" }
+      }
+    }
+  }
+}
+
+

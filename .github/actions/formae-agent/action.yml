@@ -1,0 +1,86 @@
+name: formae agent connection
+description: >
+  Connect the formae CLI to the formae agent in GKE gke-research-lab (project
+  kcd-2026, namespace formae-kcd). Afterwards $FORMAE_CONFIG points at a CLI
+  config with the agent's credentials and $FORMAE_AGENT_API at its REST API.
+  Must run on `runs-on: formae-kcd`, the ARC runner scale set in the same
+  cluster: the agent's ClusterIP Service is reachable directly (no GCP
+  credentials, no port-forward), and the runner pod gets the agent's basic
+  auth from env FORMAE_AGENT_USERNAME / FORMAE_AGENT_PASSWORD (Secret
+  formae-kcd-agent-auth in ns arc-runners, see
+  setup/arc). Called without inputs by
+  the taufik-formae-*.yml workflows.
+
+runs:
+  using: composite
+  steps:
+    - name: Check formae CLI
+      shell: bash -euo pipefail {0}
+      run: |
+        if ! command -v formae >/dev/null; then
+          echo "::error title=formae::formae CLI not found — run this job on 'runs-on: formae-kcd'"
+          exit 1
+        fi
+        formae --version | head -1
+
+    # The runner image (.github/runner/Dockerfile) ships gh, which the
+    # workflows and scripts use for PR comments. Fallback for an older image
+    # without it: fetch a pinned release into the job's temp dir (~10 MB).
+    - name: Ensure gh CLI
+      shell: bash -euo pipefail {0}
+      env:
+        GH_VERSION: "2.63.2"
+      run: |
+        if command -v gh >/dev/null; then gh --version | head -1; exit 0; fi
+        dir="$RUNNER_TEMP/gh"
+        mkdir -p "$dir"
+        curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+          | tar -xz -C "$dir" --strip-components=1
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        "$dir/bin/gh" --version | head -1
+
+    - name: Configure agent connection
+      shell: bash -euo pipefail {0}
+      env:
+        AGENT_HOST: http://formae.formae-kcd.svc.cluster.local
+        AGENT_PORT: "49684"
+      run: |
+        if [[ -z "${FORMAE_AGENT_USERNAME:-}" || -z "${FORMAE_AGENT_PASSWORD:-}" ]]; then
+          echo "::error title=formae::FORMAE_AGENT_USERNAME/PASSWORD not set on the runner pod (Secret formae-kcd-agent-auth in ns arc-runners)"
+          exit 1
+        fi
+        echo "::add-mask::$FORMAE_AGENT_PASSWORD"
+        {
+          echo "FORMAE_AGENT_API=$AGENT_HOST:$AGENT_PORT/api/v1"
+          echo "FORMAE_CONFIG=$RUNNER_TEMP/formae-config.pkl"
+        } >> "$GITHUB_ENV"
+        # Credentials are read from env at runtime, so they never land in a file.
+        cat > "$RUNNER_TEMP/formae-config.pkl" <<EOF
+        amends "formae:/Config.pkl"
+
+        cli {
+            connection = new Classic {
+                url  = "$AGENT_HOST"
+                port = $AGENT_PORT
+                auth = new Dynamic {
+                    type = "auth-basic"
+                    username = read("env:FORMAE_AGENT_USERNAME")
+                    password = read("env:FORMAE_AGENT_PASSWORD")
+                }
+            }
+        }
+        EOF
+        curl -fsS -o /dev/null "$AGENT_HOST:$AGENT_PORT/api/v1/health" \
+          || { echo "::error title=formae::agent not reachable at $AGENT_HOST:$AGENT_PORT"; exit 1; }
+        echo "formae agent reachable at $AGENT_HOST:$AGENT_PORT"
+
+    # The agent re-reads the cloud on its sync interval. Kick an immediate sync
+    # so the plan that follows sees out-of-band changes (drift) made just now.
+    # The sync runs asynchronously and the agent exposes no "done" signal, so
+    # give it a fixed head start (FORMAE_SYNC_WAIT seconds, default 20).
+    - name: Sync agent with the cloud
+      shell: bash -euo pipefail {0}
+      run: |
+        curl -fsS -X POST -u "$FORMAE_AGENT_USERNAME:$FORMAE_AGENT_PASSWORD" \
+          "$FORMAE_AGENT_API/admin/synchronize" > /dev/null
+        sleep "${FORMAE_SYNC_WAIT:-20}"

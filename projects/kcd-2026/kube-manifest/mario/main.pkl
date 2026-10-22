@@ -1,0 +1,157 @@
+/*
+ * Mario demo (from ~/work/pribadi/games/mario) in namespace mario, GKE
+ * gke-research-lab. Raw forma: stack, target and resources in this one file
+ * (same shape as `formae extract`), no shared modules. No Ingress:
+ *   kubectl -n mario port-forward svc/mario 8080:80
+ *
+ * One stack per forma folder: a reconcile apply deletes any resource in the
+ * stack that this file does not declare, so don't reuse the stack label.
+ * Labels: stack = <project>/<forma folder>, target = <project>/<cluster>.
+ */
+extends "@formae/forma.pkl"
+import "@formae/formae.pkl"
+import "@gcp/container/cluster.pkl" as gkeCluster
+import "@k8s/target.pkl" as k8sTarget
+import "@k8s/v1.35/k8s.pkl" as k8s
+import "@k8s/v1.35/core/Namespace.pkl" as Namespace
+import "@k8s/v1.35/apps/Deployment.pkl" as Deployment
+import "@k8s/v1.35/core/Service.pkl" as Service
+import "@k8s/v1.35/autoscaling/HorizontalPodAutoscaler.pkl" as HPA
+
+// k8s plugin 0.1.13/0.1.14 marks containers[].resources hasProviderDefault, and
+// formae strips such a field inside a list from both sides of the diff
+// (internal/metastructure/patch/patch_document.go): resources changes in code
+// would never reach the cluster. These subclasses redeclare the field without
+// that hint; the resource type stays K8S::Apps::Deployment.
+local class Container extends k8s.Container {
+  @formae.FieldHint {}
+  resources: k8s.ResourceRequirements?
+}
+local class PodSpec extends k8s.PodSpec { containers: Listing<Container> }
+local class PodTemplateSpec extends k8s.PodTemplateSpec { spec: PodSpec? }
+local class DeploymentSpec extends Deployment.DeploymentSpec { template: PodTemplateSpec }
+local class MarioDeployment extends Deployment.Deployment { spec: DeploymentSpec? }
+
+// The GKE cluster as found by the agent's discovery (stack `$unmanaged`,
+// label = cluster name). The target takes endpoint and CA from it, so no IP or
+// certificate is written here. Needs a discovery run after the GCP target
+// kcd-2026 exists (any applied GCP forma of the project, e.g. the bucket).
+local cluster = new gkeCluster.ClusterResolvable { label = "gke-research-lab"; stack = "$unmanaged" }
+
+// Objects in namespace mario reference the Namespace resource, so formae
+// creates it first (and deletes it last).
+local ns = new Namespace.NamespaceResolvable { label = "namespace-mario"; stack = "kcd-2026/kube-manifest/mario" }
+
+local appLabels = new Mapping { ["app"] = "mario" }
+
+forma {
+  new formae.Stack {
+    label = "kcd-2026/kube-manifest/mario"
+    description = "Mario demo app in namespace mario (GKE gke-research-lab)"
+  }
+
+  new formae.Target {
+    label = "kcd-2026/gke-research-lab"
+    config = new k8sTarget.Config {
+      kubernetesVersion = "1.35"
+      auth = new k8sTarget.GKEAuth {
+        // The Resolvable itself, not "https://\(...)": the agent resolves only a
+        // whole-value reference here (a reference inside a string reaches the
+        // plugin unresolved), and the plugin adds https:// on its own.
+        endpoint = cluster.endpoint
+        certificateAuthority = cluster.clusterCaCertificate
+        projectId = "kcd-2026"
+        location = "asia-southeast2-a"
+        clusterName = "gke-research-lab"
+      }
+    }
+  }
+
+  new Namespace.Namespace {
+    label = "namespace-mario"
+    apiVersion = "v1"
+    kind = "Namespace"
+    metadata { name = "mario" }
+  }
+
+  new MarioDeployment {
+    label = "deployment-mario"
+    apiVersion = "apps/v1"
+    kind = "Deployment"
+    metadata {
+      name = "mario"
+      namespace = ns.name
+      labels = appLabels
+    }
+    spec {
+      // Initial count. The HPA below scales through the scale subresource;
+      // formae doesn't treat that as drift (the field gets another owner).
+      replicas = 2
+      selector { matchLabels = appLabels }
+      template {
+        metadata { labels = appLabels }
+        spec {
+          containers {
+            new {
+              name = "mario"
+              image = "guopingjia/mario:cfe-demo"
+              ports { new { containerPort = 80 } }
+              resources {
+                requests { ["cpu"] = "50m"; ["memory"] = "64Mi" }
+                limits { ["cpu"] = "200m"; ["memory"] = "128Mi" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  new Service.Service {
+    label = "service-mario"
+    apiVersion = "v1"
+    kind = "Service"
+    metadata {
+      name = "mario"
+      namespace = ns.name
+    }
+    spec {
+      selector = appLabels
+      ports {
+        new { name = "port"; protocol = "TCP"; port = 80; targetPort = 80 }
+      }
+    }
+  }
+
+  new HPA.HorizontalPodAutoscaler {
+    label = "hpa-mario"
+    apiVersion = "autoscaling/v2"
+    kind = "HorizontalPodAutoscaler"
+    metadata {
+      name = "mario"
+      namespace = ns.name
+    }
+    spec {
+      scaleTargetRef {
+        apiVersion = "apps/v1"
+        kind = "Deployment"
+        name = "mario"
+      }
+      minReplicas = 1
+      maxReplicas = 4
+      metrics {
+        new {
+          type = "Resource"
+          resource {
+            name = "cpu"
+            // Utilization of the container's cpu request (50m above).
+            target {
+              type = "Utilization"
+              averageUtilization = 70
+            }
+          }
+        }
+      }
+    }
+  }
+}

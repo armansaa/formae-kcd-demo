@@ -84,6 +84,18 @@ Nobody approves drift before it is absorbed, so these rules are the only brakes:
 | `setup/kcd-demo-namespace-rbac.yaml` | Demo namespace and write access for the agent |
 | `setup/arc/runner-scale-set.yaml` | ARC values for the `formae-kcd` runner scale set |
 | `setup/arc/reality-sync-trigger.yaml` | In-cluster CronJob that dispatches `reality-sync` every 10 minutes |
+| `projects/kcd-2026/<kind>/<name>/main.pkl` | Second set of formae (bucket, Cloud SQL, the `mario` app), one stack per folder, managed by a second agent in namespace `formae-kcd` |
+| `.github/workflows/taufik-formae-*.yml`, `.github/scripts/formae-*.sh` | Atlantis-style flow for `projects/`: plan on every PR, then `formae plan` / `formae apply [-d <dir>]` / `formae import` as PR comments |
+| `.github/workflows/reality-sync-kcd-2026.yml`, `.github/scripts/reality-sync.sh` | The same reality-sync loop for `projects/`; `.github/scripts/formae-extract-desired.sh` writes the absorbed state back |
+| `.github/actions/formae-agent/` | CLI connection to the agent in namespace `formae-kcd` |
+| `setup/arc/reality-sync-trigger-kcd-2026.yaml` | CronJob that dispatches `reality-sync-kcd-2026` every 10 minutes |
+
+### Two agents, one repo
+
+`stacks/` is applied on merge to the agent in namespace `formae`. `projects/kcd-2026/` goes through
+PR comments to the agent in namespace `formae-kcd`. Both run in the same GKE cluster and share one
+runner scale set (`formae-kcd`); a runner pod carries the credentials of both agents. Keep each stack
+in one place: never declare the same resource under both `stacks/` and `projects/`.
 
 ## Tested with formae 0.90.5 on GKE 1.35
 

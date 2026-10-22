@@ -1,0 +1,322 @@
+name: "formae apply: kcd-2026"
+
+# "Apply" half of the Atlantis-style flow, on an approved PR:
+#   formae apply                     apply every forma the PR touches
+#   formae apply -d <dir> [-d <dir>] apply only those formae (like atlantis -d)
+#   formae apply -d <dir>            on a forma whose folder the PR deletes:
+#                                    DESTROY its resources (-d is required)
+#   formae apply -d <dir> --absorb   drift: accept the cloud's current state
+#                                    (code must already match it; nothing in
+#                                    the cloud changes)
+# The PR is not merged automatically: after an apply, comment `formae plan` to
+# confirm nothing is left to change, then merge it.
+#
+# issue_comment workflows always run the workflow file from the default
+# branch, so changes to this file only take effect once merged to main.
+#
+# Guards: commenter has write access, PR is open, approved, from this repo,
+# and every forma's fresh plan is free of drift (reality wins: update the
+# code first, see formae-scan-report.sh).
+
+on:
+  issue_comment:
+    types: [created]
+
+env:
+  PROJECT_DIR: projects/kcd-2026
+
+jobs:
+  apply:
+    if: >-
+      github.event.issue.pull_request &&
+      (startsWith(github.event.comment.body, 'formae apply') ||
+       startsWith(github.event.comment.body, fromJSON('"\nformae apply"')) ||
+       startsWith(github.event.comment.body, fromJSON('"\r\nformae apply"')))
+    # Job-level, not workflow-level: every PR comment (including the bot's
+    # own) starts a run, and a workflow-level group would let those skipped
+    # runs cancel or displace the real one.
+    concurrency:
+      group: formae-apply-kcd-2026
+      cancel-in-progress: false
+    runs-on: formae-kcd
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    permissions:
+      contents: read
+      id-token: write       # WIF -> agent credentials + GKE port-forward
+      pull-requests: write  # comments
+    env:
+      PR: ${{ github.event.issue.number }}
+      # `gh pr ...` needs the repo; the first steps run before checkout.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # Comments are made as the "formae-agent" GitHub App when it is
+      # configured (vars.APP_ID + secrets.APP_PRIVATE_KEY), else
+      # as github-actions[bot].
+      - name: GitHub token
+        id: app-token
+        if: vars.APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Use token
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: echo "GH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Check request
+        id: pr
+        env:
+          ACTOR: ${{ github.event.comment.user.login }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          fail() {
+            gh pr comment "$PR" --body ":no_entry: \`formae apply\` refused: $1"
+            echo "::error title=formae apply::$1"
+            exit 1
+          }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null
+
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)
+          [[ "$perm" =~ ^(admin|maintain|write)$ ]] || fail "@$ACTOR needs write access (has: $perm)."
+
+          info=$(gh pr view "$PR" --json state,headRefOid,baseRefName,isCrossRepository,latestReviews,author)
+          [[ $(jq -r .state <<<"$info") == OPEN ]] || fail "PR is not open."
+          [[ $(jq -r .isCrossRepository <<<"$info") == false ]] || fail "PRs from forks can't be applied."
+          [[ $(jq -r .baseRefName <<<"$info") == main ]] || fail "PR must target main."
+          approved=$(jq '[.latestReviews[] | select(.state == "APPROVED")] | length' <<<"$info")
+          blocked=$(jq '[.latestReviews[] | select(.state == "CHANGES_REQUESTED")] | length' <<<"$info")
+          (( approved > 0 && blocked == 0 )) || fail "PR needs an approval and no outstanding change requests."
+
+          # Command: first line only, `formae apply [-d <dir>]...` (checked out
+          # below, so read the parser from the API).
+          gh api "repos/$GITHUB_REPOSITORY/contents/.github/scripts/formae-command.sh?ref=$GITHUB_SHA" \
+            --jq .content | base64 -d > "$RUNNER_TEMP/formae-command.sh"
+          # Optional trailing `--absorb`; the rest is the usual -d parsing.
+          absorb=false
+          first=$(tr -d '\r' <<<"$COMMENT_BODY" | sed -n '/[^[:space:]]/{p;q;}' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+          if [[ "$first" == *" --absorb" ]]; then
+            absorb=true
+            first=${first% --absorb}
+          fi
+          dirs=$(COMMENT_BODY="$first" bash "$RUNNER_TEMP/formae-command.sh" apply) \
+            || fail "usage: \`formae apply [-d <dir>]...\` or \`formae apply -d <dir> --absorb\`"
+
+          echo "head=$(jq -r .headRefOid <<<"$info")" >> "$GITHUB_OUTPUT"
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+          echo "absorb=$absorb" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head }}
+          fetch-depth: 0
+
+      - name: Detect changed formae
+        id: detect
+        env:
+          DIRS: ${{ steps.pr.outputs.dirs }}
+        run: |
+          base=$(git merge-base origin/main HEAD)
+          all=$(bash .github/scripts/formae-changed.sh "$base" HEAD)
+          # Every projects/<project> has its own copy of this workflow reacting
+          # to the same comment: only act on (and talk about) this project.
+          if [[ "$DIRS" != "[]" ]]; then
+            DIRS=$(jq -c --arg p "$PROJECT_DIR/" '[.[] | select(startswith($p))]' <<<"$DIRS")
+            if [[ "$DIRS" == "[]" ]]; then
+              echo "No -d folder under $PROJECT_DIR: the comment is for another project."
+              { echo "all=[]"; echo "formae=[]"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          # Say "no forma" only when the PR touches no forma in any project
+          # (otherwise the other project's workflow handles it).
+          if [[ "$all" == "[]" ]] && [[ $(PROJECT_DIR=projects bash .github/scripts/formae-changed.sh "$base" HEAD) == "[]" ]]; then
+            gh pr comment "$PR" --body ":information_source: \`formae apply\`: this PR touches no forma under \`projects/\`."
+          fi
+          if [[ "$DIRS" == "[]" ]]; then
+            selected=$all
+          else
+            # -d must name formae this PR touches (exact folder, as in the plan comments).
+            unknown=$(jq -nr --argjson d "$DIRS" --argjson a "$all" '$d - $a | join(", ")')
+            if [[ -n "$unknown" ]]; then
+              gh pr comment "$PR" --body ":no_entry: \`formae apply\` refused: not a forma touched by this PR: \`$unknown\`. Use the folder from a plan comment."
+              exit 1
+            fi
+            selected=$DIRS
+          fi
+          echo "All formae in PR: $all"
+          echo "Formae to apply:  $selected"
+          echo "all=$all" >> "$GITHUB_OUTPUT"
+          echo "formae=$selected" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/formae-agent
+        if: steps.detect.outputs.formae != '[]'
+
+      - name: Apply
+        if: steps.detect.outputs.formae != '[]'
+        env:
+          FORMAE: ${{ steps.detect.outputs.formae }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          ABSORB: ${{ steps.pr.outputs.absorb }}
+          DIRS: ${{ steps.pr.outputs.dirs }}
+        run: |
+          out="$RUNNER_TEMP/apply.md"
+          echo "## formae apply (${HEAD_SHA:0:7})" > "$out"
+          finish() {
+            gh pr comment "$PR" --body-file "$out"
+            exit "$1"
+          }
+
+          # Formae whose folder this PR deletes are destroyed, from the forma file
+          # as of the PR's base. Only on an explicit -d, never with --absorb.
+          base=$(git merge-base origin/main HEAD)
+          deleted=$(for f in $(jq -r '.[]' <<<"$FORMAE"); do [[ -f "$f/main.pkl" ]] || echo "$f"; done)
+          if [[ -n "$deleted" && "$DIRS" == "[]" ]]; then
+            { echo; echo ":no_entry: Not applied — this PR deletes forma folders, which destroys their resources. Name each one explicitly:"; echo
+              for f in $deleted; do echo "- \`formae apply -d $f\`"; done; } >> "$out"
+            finish 1
+          fi
+          if [[ -n "$deleted" && "$ABSORB" == true ]]; then
+            { echo; echo ":no_entry: Not applied — \`--absorb\` can't be combined with destroying a deleted forma."; } >> "$out"
+            finish 1
+          fi
+
+          for forma in $(jq -r '.[]' <<<"$FORMAE"); do
+            echo "::group::$forma"
+            mode=apply
+            extra=()
+            if [[ ! -f "$forma/main.pkl" ]]; then
+              mode=destroy
+              verb=destroyed
+              old=$(bash .github/scripts/formae-old-forma.sh "$forma" "$base")
+              formae destroy --config "$FORMAE_CONFIG" --simulate --yes \
+                --output-consumer machine --output-schema json \
+                "$old" > "$RUNNER_TEMP/simulate.json" 2> "$RUNNER_TEMP/simulate.err" || true
+              rc=0
+              REPORT_MD="$RUNNER_TEMP/plan.md" \
+                bash .github/scripts/formae-scan-report.sh "$RUNNER_TEMP/simulate.json" "$forma" || rc=$?
+              if (( rc != 0 )); then
+                cat "$RUNNER_TEMP/simulate.err"
+                { echo; echo ":x: **Not destroyed** — the destroy plan for \`$forma\` is not clean:"; echo; cat "$RUNNER_TEMP/plan.md"; } >> "$out"
+                finish 1
+              fi
+              if [[ $(jq -r '.ChangesRequired // false' "$RUNNER_TEMP/simulate.json") != true ]]; then
+                { echo; echo ":white_check_mark: \`$forma\` — removed from the repo, nothing left to destroy."; } >> "$out"
+                echo "::endgroup::"
+                continue
+              fi
+            else
+            # Fresh plan: refuse on drift or anything unparseable.
+            formae apply --config "$FORMAE_CONFIG" --mode reconcile --simulate --yes \
+              --output-consumer machine --output-schema json \
+              "$forma/main.pkl" > "$RUNNER_TEMP/simulate.json" 2> "$RUNNER_TEMP/simulate.err" || true
+            verb=applied
+            drift=$(jq -r 'if .error == "ReconcileRejected" then "yes" else "no" end' "$RUNNER_TEMP/simulate.json" 2>/dev/null || echo no)
+            if [[ "$ABSORB" == true && "$drift" == yes ]]; then
+              # Accept every drifted resource as it is in the cloud...
+              jq '{ObservationID: .data.ObservationID,
+                   Decisions: [.data.ModifiedStacks[].ModifiedResources[] | {ResourceID, Action: "absorb"}]}' \
+                "$RUNNER_TEMP/simulate.json" > "$RUNNER_TEMP/resolution.json"
+              formae apply --config "$FORMAE_CONFIG" --mode reconcile --simulate --yes \
+                --resolution "$RUNNER_TEMP/resolution.json" --output-consumer machine --output-schema json \
+                "$forma/main.pkl" > "$RUNNER_TEMP/absorb.json" 2> "$RUNNER_TEMP/simulate.err" || true
+              # ...but only if that is all the apply would do. Anything else means
+              # the code still differs from the cloud: fix the code first.
+              other=$(jq -r '[(.Simulation.Command // .Command // {}) as $c
+                               | ($c.ResourceUpdates // [])[] | select(.Operation != "accept")
+                               | "\(.Operation) \(.ResourceType) \(.ResourceLabel // .ResourceId)"]
+                             + [((.Simulation.Command // .Command // {}).StackUpdates // [])[] | "\(.Operation) stack \(.StackLabel)"]
+                             | join(", ")' "$RUNNER_TEMP/absorb.json" 2>/dev/null || echo "unreadable simulate output")
+              if [[ -n "$other" ]]; then
+                cat "$RUNNER_TEMP/simulate.err"
+                { echo; echo ":x: **Not absorbed** — \`$forma\`: besides accepting the drift, this apply would also: $other. Update the code to match the cloud, push, then comment \`formae apply -d $forma --absorb\` again."; } >> "$out"
+                finish 1
+              fi
+              # Final submit carries the review's ReviewID plus an idempotency key,
+              # exactly like the formae CLI does (internal/cli/apply/apply.go).
+              jq --slurpfile r "$RUNNER_TEMP/absorb.json" --arg key "gha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(basename "$forma")" \
+                '. + {ReviewID: $r[0].Review.ReviewID, IdempotencyKey: $key}' \
+                "$RUNNER_TEMP/resolution.json" > "$RUNNER_TEMP/resolution-final.json"
+              if [[ $(jq -r '.ReviewID // ""' "$RUNNER_TEMP/resolution-final.json") == "" ]]; then
+                { echo; echo ":x: **Not absorbed** — \`$forma\`: the agent returned no drift review to confirm."; } >> "$out"
+                finish 1
+              fi
+              extra=(--resolution "$RUNNER_TEMP/resolution-final.json")
+              verb="absorbed (cloud state accepted, nothing changed in the cloud)"
+            else
+              rc=0
+              REPORT_MD="$RUNNER_TEMP/plan.md" \
+                bash .github/scripts/formae-scan-report.sh "$RUNNER_TEMP/simulate.json" "$forma" || rc=$?
+              if (( rc != 0 )); then
+                cat "$RUNNER_TEMP/simulate.err"
+                { echo; echo ":x: **Not applied** — the plan is not clean:"; echo; cat "$RUNNER_TEMP/plan.md"; } >> "$out"
+                if [[ "$drift" == yes ]]; then
+                  { echo; echo "Reality wins: update the code to match the cloud, push, then comment \`formae apply -d $forma --absorb\`."; } >> "$out"
+                fi
+                finish 1
+              fi
+              if [[ $(jq -r '.ChangesRequired // false' "$RUNNER_TEMP/simulate.json") != true ]]; then
+                { echo; echo ":white_check_mark: \`$forma\` — no changes, nothing to apply."; } >> "$out"
+                echo "::endgroup::"
+                continue
+              fi
+            fi
+
+            fi
+
+            # Apply/destroy is asynchronous on the agent: submit, then poll until done.
+            if [[ $mode == destroy ]]; then
+              formae destroy --config "$FORMAE_CONFIG" --yes \
+                --output-consumer machine --output-schema json "$old" \
+                > "$RUNNER_TEMP/submit.json" 2> "$RUNNER_TEMP/submit.err" || true
+            else
+              formae apply --config "$FORMAE_CONFIG" --mode reconcile --yes "${extra[@]}" \
+                --message "taufik-test#$PR ${HEAD_SHA:0:7}" \
+                --output-consumer machine --output-schema json "$forma/main.pkl" \
+                > "$RUNNER_TEMP/submit.json" 2> "$RUNNER_TEMP/submit.err" || true
+            fi
+            cmd=$(jq -r '.CommandId // empty' "$RUNNER_TEMP/submit.json" 2>/dev/null || true)
+            if [[ -z "$cmd" ]]; then
+              cat "$RUNNER_TEMP/submit.err" "$RUNNER_TEMP/submit.json"
+              reason=$(jq -r '[.error, .data.Code, .data.Reason] | map(select(. != null)) | join(" — ")' "$RUNNER_TEMP/submit.json" 2>/dev/null || true)
+              [[ -n "$reason" ]] || reason=$(grep -v WRN "$RUNNER_TEMP/submit.err" | tail -3 | tr '\n' ' ')
+              { echo; echo ":x: \`$forma\` — **rejected by the agent**: ${reason:-no reason given, see the job log}"; } >> "$out"
+              finish 1
+            fi
+            echo "command $cmd"
+            state=""
+            for _ in $(seq 1 360); do   # up to 30 min (Cloud SQL creates are slow)
+              state=$(formae command status "$cmd" --config "$FORMAE_CONFIG" \
+                --output-consumer machine --output-schema json | jq -r '.Commands[0].State')
+              case "$state" in
+                Success|Failed|Canceled) break ;;
+              esac
+              sleep 5
+            done
+            formae command status "$cmd" --config "$FORMAE_CONFIG" \
+              --output-consumer machine --output-schema json > "$RUNNER_TEMP/status.json" || true
+            {
+              echo
+              if [[ "$state" == Success ]]; then
+                echo ":white_check_mark: \`$forma\` — $verb (command \`$cmd\`)"
+              else
+                echo ":x: \`$forma\` — **$state** (command \`$cmd\`)"
+              fi
+              echo
+              echo '| | Operation | Type | Label | State |'
+              echo '|---|---|---|---|---|'
+              jq -r '.Commands[0].ResourceUpdates[]? | "| | \(.Operation) | `\(.ResourceType)` | `\(.ResourceLabel // .ResourceId)` | \(.State)\(if .ErrorMessage then " — " + .ErrorMessage else "" end) |"' "$RUNNER_TEMP/status.json"
+            } >> "$out"
+            echo "::endgroup::"
+            [[ "$state" == Success ]] || finish 1
+          done
+          {
+            echo
+            echo "---"
+            echo "Next: comment \`formae plan\` to confirm nothing is left to change, then merge this PR."
+          } >> "$out"
+          gh pr comment "$PR" --body-file "$out"
