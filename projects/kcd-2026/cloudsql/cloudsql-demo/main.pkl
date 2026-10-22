@@ -32,7 +32,7 @@ forma {
     databaseVersion = "POSTGRES_18"
     region = "asia-southeast2"
     settings = new database.Settings {
-      tier = "db-f1-micro"
+      tier = "db-g1-small"
       availabilityType = "ZONAL"
       edition = "ENTERPRISE"
       dataDiskType = "PD_SSD"
