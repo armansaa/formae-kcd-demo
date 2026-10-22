@@ -1,0 +1,123 @@
+name: "formae plan: kcd-2026"
+
+# "Plan" half of the Atlantis-style flow for projects/kcd-2026:
+# `formae eval` + `formae apply --simulate` against the agent in GKE.
+#   - pull_request: the formae the PR touches; result posted as a PR comment.
+#     Apply with a `formae apply` comment (taufik-formae-apply.yml).
+#   - push to main: the formae the push touches.
+#   - schedule / workflow_dispatch: every forma — drift detection, i.e. did
+#     reality change behind the code's back? Reality wins: fix by updating the
+#     code (see .github/scripts/formae-scan-report.sh).
+# Never applies for real.
+#
+# Ref: https://docs.formae.ai/documentation/guides/cicd
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "projects/kcd-2026/**"
+      - "modules/**"
+      - "PklProject"
+      - "PklProject.deps.json"
+      - ".github/workflows/taufik-formae-*.yml"
+      - ".github/scripts/formae-*.sh"
+      - ".github/actions/formae-agent/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "projects/kcd-2026/**"
+      - "modules/**"
+      - "PklProject"
+      - "PklProject.deps.json"
+      - ".github/workflows/taufik-formae-*.yml"
+      - ".github/scripts/formae-*.sh"
+      - ".github/actions/formae-agent/**"
+  schedule:
+    # Hourly drift check. The agent itself re-syncs with GCP every 5 minutes.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: formae-plan-kcd-2026-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_DIR: projects/kcd-2026
+
+jobs:
+  changes:
+    runs-on: formae-kcd
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    permissions:
+      contents: read
+    outputs:
+      formae: ${{ steps.detect.outputs.formae }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed formae
+        id: detect
+        env:
+          # Empty for schedule / workflow_dispatch -> every forma.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          json=$(bash .github/scripts/formae-changed.sh "$BASE_SHA" "$GITHUB_SHA")
+          echo "Formae to plan: $json"
+          echo "formae=$json" >> "$GITHUB_OUTPUT"
+
+  plan:
+    needs: changes
+    if: needs.changes.outputs.formae != '[]'
+    runs-on: formae-kcd
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    permissions:
+      contents: read
+      id-token: write       # WIF -> agent credentials + GKE port-forward
+      pull-requests: write  # plan comment
+    strategy:
+      fail-fast: false
+      matrix:
+        forma: ${{ fromJson(needs.changes.outputs.formae) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # base commit, for formae whose folder was deleted
+
+      - uses: ./.github/actions/formae-agent
+
+      # Comments are made as the "formae-agent" GitHub App when it is
+      # configured (vars.APP_ID + secrets.APP_PRIVATE_KEY), else
+      # as github-actions[bot].
+      - name: GitHub token
+        id: app-token
+        if: github.event_name == 'pull_request' && vars.APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # eval + simulate (or destroy --simulate for a deleted forma); on a PR,
+      # posts a fresh plan comment and hides that forma's older ones.
+      - name: Plan
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            FORMAE_BASE=$(git merge-base origin/main HEAD)
+          else
+            FORMAE_BASE=$PUSH_BASE
+          fi
+          export FORMAE_BASE
+          bash .github/scripts/formae-plan-forma.sh "${{ matrix.forma }}" "$PR" "$HEAD_SHA"

@@ -1,7 +1,7 @@
 # Values for the gha-runner-scale-set chart (ARC). Runners live in the arc-runners namespace,
 # one pod per job, and reach the formae agent through its ClusterIP Service.
 #
-#   helm install formae-kcd \
+#   helm upgrade --install formae-kcd \
 #     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
 #     -n arc-runners --create-namespace -f setup/arc/runner-scale-set.yaml
 githubConfigUrl: https://github.com/armansaa/formae-kcd-demo
@@ -11,10 +11,11 @@ githubConfigSecret: arc-github-app
 # This is the name used in the workflows' `runs-on:`.
 runnerScaleSetName: formae-kcd
 
-# 0 = a fresh runner pod per job (cheap). On demo day set 1 so jobs don't wait for a pod to
-# start (~30-60 seconds).
-minRunners: 0
-maxRunners: 1
+# Two pods on standby so jobs don't wait for a pod to start (~30-60 seconds). After the event
+# set minRunners back to 0 (a fresh pod per job, cheaper). maxRunners 3: the taufik-formae-*
+# workflows and both reality-sync workflows can run at the same time.
+minRunners: 2
+maxRunners: 3
 
 template:
   spec:
@@ -23,6 +24,17 @@ template:
         image: ghcr.io/armansaa/formae-kcd-runner:0.90.5
         imagePullPolicy: Always
         command: ["/home/runner/run.sh"]
+        # Basic auth of the second agent (namespace formae-kcd), read by .github/actions/formae-agent
+        # for the taufik-formae-* workflows and reality-sync-kcd-2026 (composite actions can't read
+        # GitHub secrets). Secret formae-kcd-agent-auth, created with kubectl, plaintext password.
+        # The workflows for stacks/ keep using the FORMAE_USER / FORMAE_PASSWORD repo secrets.
+        env:
+          - name: FORMAE_AGENT_USERNAME
+            valueFrom:
+              secretKeyRef: { name: formae-kcd-agent-auth, key: username }
+          - name: FORMAE_AGENT_PASSWORD
+            valueFrom:
+              secretKeyRef: { name: formae-kcd-agent-auth, key: password }
         resources:
           requests:
             cpu: 100m

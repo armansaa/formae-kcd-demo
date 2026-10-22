@@ -1,0 +1,149 @@
+name: "formae plan (comment): kcd-2026"
+
+# Re-plan on demand from a PR comment, like `atlantis plan`:
+#   formae plan                     plan every forma the PR touches
+#   formae plan -d <dir> [-d <dir>] plan only those formae
+# Posts the same plan comment as the push-triggered plan
+# (taufik-formae-scan.yml). Never applies.
+#
+# issue_comment workflows always run the workflow file from the default
+# branch, so changes to this file only take effect once merged to main.
+
+on:
+  issue_comment:
+    types: [created]
+
+env:
+  PROJECT_DIR: projects/kcd-2026
+
+jobs:
+  plan:
+    if: >-
+      github.event.issue.pull_request &&
+      (startsWith(github.event.comment.body, 'formae plan') ||
+       startsWith(github.event.comment.body, fromJSON('"\nformae plan"')) ||
+       startsWith(github.event.comment.body, fromJSON('"\r\nformae plan"')))
+    # Job-level, not workflow-level: every PR comment (including the bot's
+    # own) starts a run, and a workflow-level group would let those skipped
+    # runs cancel or displace the real one.
+    concurrency:
+      group: formae-comment-plan-kcd-2026-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    runs-on: formae-kcd
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    permissions:
+      contents: read
+      id-token: write       # WIF -> agent credentials + GKE port-forward
+      pull-requests: write  # comments
+    env:
+      PR: ${{ github.event.issue.number }}
+      # `gh pr ...` needs the repo; the first steps run before checkout.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # Comments are made as the "formae-agent" GitHub App when it is
+      # configured (vars.APP_ID + secrets.APP_PRIVATE_KEY), else
+      # as github-actions[bot].
+      - name: GitHub token
+        id: app-token
+        if: vars.APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Use token
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: echo "GH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Check request
+        id: pr
+        env:
+          ACTOR: ${{ github.event.comment.user.login }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          fail() {
+            gh pr comment "$PR" --body ":no_entry: \`formae plan\` refused: $1"
+            echo "::error title=formae plan::$1"
+            exit 1
+          }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null
+
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)
+          [[ "$perm" =~ ^(admin|maintain|write)$ ]] || fail "@$ACTOR needs write access (has: $perm)."
+
+          info=$(gh pr view "$PR" --json state,headRefOid,isCrossRepository)
+          [[ $(jq -r .state <<<"$info") == OPEN ]] || fail "PR is not open."
+          [[ $(jq -r .isCrossRepository <<<"$info") == false ]] || fail "PRs from forks can't be planned."
+
+          # Parser from main (this run's sha), not from the PR branch.
+          gh api "repos/$GITHUB_REPOSITORY/contents/.github/scripts/formae-command.sh?ref=$GITHUB_SHA" \
+            --jq .content | base64 -d > "$RUNNER_TEMP/formae-command.sh"
+          dirs=$(bash "$RUNNER_TEMP/formae-command.sh" plan) \
+            || fail "usage: \`formae plan\` or \`formae plan -d <dir> [-d <dir>]\`"
+
+          echo "head=$(jq -r .headRefOid <<<"$info")" >> "$GITHUB_OUTPUT"
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head }}
+          fetch-depth: 0
+
+      - name: Detect changed formae
+        id: detect
+        env:
+          DIRS: ${{ steps.pr.outputs.dirs }}
+        run: |
+          base=$(git merge-base origin/main HEAD)
+          all=$(bash .github/scripts/formae-changed.sh "$base" HEAD)
+          # Every projects/<project> has its own copy of this workflow reacting
+          # to the same comment: only act on (and talk about) this project.
+          if [[ "$DIRS" != "[]" ]]; then
+            DIRS=$(jq -c --arg p "$PROJECT_DIR/" '[.[] | select(startswith($p))]' <<<"$DIRS")
+            if [[ "$DIRS" == "[]" ]]; then
+              echo "No -d folder under $PROJECT_DIR: the comment is for another project."
+              { echo "all=[]"; echo "formae=[]"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          # Say "no forma" only when the PR touches no forma in any project
+          # (otherwise the other project's workflow handles it).
+          if [[ "$all" == "[]" ]] && [[ $(PROJECT_DIR=projects bash .github/scripts/formae-changed.sh "$base" HEAD) == "[]" ]]; then
+            gh pr comment "$PR" --body ":information_source: \`formae plan\`: this PR touches no forma under \`projects/\`."
+          fi
+          if [[ "$DIRS" == "[]" ]]; then
+            selected=$all
+          else
+            unknown=$(jq -nr --argjson d "$DIRS" --argjson a "$all" '$d - $a | join(", ")')
+            if [[ -n "$unknown" ]]; then
+              gh pr comment "$PR" --body ":no_entry: \`formae plan\` refused: not a forma touched by this PR: \`$unknown\`. Use the folder from a plan comment."
+              exit 1
+            fi
+            selected=$DIRS
+          fi
+          echo "Formae to plan: $selected"
+          echo "formae=$selected" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/formae-agent
+        if: steps.detect.outputs.formae != '[]'
+
+      - name: Plan
+        if: steps.detect.outputs.formae != '[]'
+        env:
+          FORMAE: ${{ steps.detect.outputs.formae }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+        run: |
+          # Base for formae whose folder this PR deletes (planned as a destroy).
+          FORMAE_BASE=$(git merge-base origin/main HEAD)
+          export FORMAE_BASE
+          failed=0
+          for forma in $(jq -r '.[]' <<<"$FORMAE"); do
+            echo "::group::$forma"
+            bash .github/scripts/formae-plan-forma.sh "$forma" "$PR" "$HEAD_SHA" || failed=1
+            echo "::endgroup::"
+          done
+          exit "$failed"
