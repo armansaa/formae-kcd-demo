@@ -10,9 +10,10 @@
 # Flow:
 #   1. simulate a soft reconcile of the stack file (machine output, JSON)
 #   2. no drift                    -> status=clean     (or code-differs if file != agent)
-#   3. drift, passes guardrails    -> absorb via --resolution against the agent's desired state
-#                                     (not the Git file, which may lag behind an open PR),
-#                                     wait for the command, extract --desired into the file
+#   3. drift, passes guardrails    -> absorb via --resolution, reviewed against the file on main
+#                                     (or against the agent's desired state when main lags behind,
+#                                     e.g. an open PR), wait for the command, extract --desired
+#                                     into the file
 #                                     -> status=absorbed
 #   4. drift, hits a guardrail     -> touch nothing -> status=blocked
 #
@@ -75,16 +76,6 @@ if ! jq -e '.data.ObservationID // empty' "$OUT/simulate.json" > /dev/null 2>&1;
 fi
 
 cp "$STACK_FILE" "$OUT/original.pkl"
-"$(dirname "$0")/formae-extract-desired.sh" "$STACK" "$OUT/desired.pkl"
-cp "$OUT/desired.pkl" "$STACK_FILE"
-set +e
-formae_m apply --mode reconcile --simulate "$STACK_FILE" > "$OUT/simulate.json" 2> "$OUT/simulate.err"
-set -e
-if ! jq -e '.data.ObservationID // empty' "$OUT/simulate.json" > /dev/null 2>&1; then
-  echo "No drift observation against the agent's desired state:" >&2
-  cat "$OUT/simulate.json" "$OUT/simulate.err" >&2 || true
-  finish error 1
-fi
 
 # ---------- 2. read drift + guardrails ----------
 OBS_ID="$(jq -r '.data.ObservationID' "$OUT/simulate.json")"
@@ -143,16 +134,41 @@ if [[ -n "$blocked_reasons" ]]; then
 fi
 
 # ---------- 3. absorb via --resolution ----------
-jq -n --arg obs "$OBS_ID" --slurpfile r "$OUT/resources.json" '{
-  ObservationID: $obs,
-  IdempotencyKey: ("reality-sync-" + $obs),
-  Decisions: [ $r[0][] | {ResourceID: .ResourceID, Action: "absorb"} ]
-}' > "$OUT/resolution.json"
+review() {
+  jq -n --arg obs "$OBS_ID" --slurpfile r "$OUT/resources.json" '{
+    ObservationID: $obs,
+    IdempotencyKey: ("reality-sync-" + $obs),
+    Decisions: [ $r[0][] | {ResourceID: .ResourceID, Action: "absorb"} ]
+  }' > "$OUT/resolution.json"
+  formae_m apply --mode reconcile --simulate --yes \
+    --resolution "$OUT/resolution.json" \
+    "$STACK_FILE" > "$OUT/review.json"
+}
 
-formae_m apply --mode reconcile --simulate --yes \
-  --resolution "$OUT/resolution.json" \
-  "$STACK_FILE" > "$OUT/review.json" \
-  || { echo "Review of the resolution failed:" >&2; cat "$OUT/review.json" >&2; finish error 1; }
+# Review against the file on main first: it carries the forma's own schema (e.g. the container
+# subclass in kube-manifest/promo and mario), and a rendered copy with the plain plugin schema is
+# rejected as a schema edit. Fall back to the agent's desired state only when main lags behind
+# the agent on the drifted field (e.g. an unmerged bot PR), which the agent also rejects as an edit.
+if ! review; then
+  if ! jq -e '.data.Code == "decision-edit-conflict"' "$OUT/review.json" > /dev/null 2>&1; then
+    echo "Review of the resolution failed:" >&2; cat "$OUT/review.json" >&2; finish error 1
+  fi
+  echo "Review against the file on main conflicts, retrying against the agent's desired state:" >&2
+  cat "$OUT/review.json" >&2
+  "$(dirname "$0")/formae-extract-desired.sh" "$STACK" "$OUT/desired.pkl"
+  cp "$OUT/desired.pkl" "$STACK_FILE"
+  set +e
+  formae_m apply --mode reconcile --simulate "$STACK_FILE" > "$OUT/simulate.json" 2> "$OUT/simulate.err"
+  set -e
+  if ! jq -e '.data.ObservationID // empty' "$OUT/simulate.json" > /dev/null 2>&1; then
+    echo "No drift observation against the agent's desired state:" >&2
+    cat "$OUT/simulate.json" "$OUT/simulate.err" >&2 || true
+    finish error 1
+  fi
+  OBS_ID="$(jq -r '.data.ObservationID' "$OUT/simulate.json")"
+  jq -c '[.data.ModifiedStacks[]?.ModifiedResources[]?]' "$OUT/simulate.json" > "$OUT/resources.json"
+  review || { echo "Review of the resolution failed:" >&2; cat "$OUT/review.json" >&2; finish error 1; }
+fi
 REVIEW_ID="$(jq -r '.Review.ReviewID // empty' "$OUT/review.json")"
 [[ -n "$REVIEW_ID" ]] || { echo "Review returned no ReviewID:" >&2; cat "$OUT/review.json" >&2; finish error 1; }
 jq --arg review "$REVIEW_ID" '. + {ReviewID: $review}' "$OUT/resolution.json" > "$OUT/resolution.final.json"

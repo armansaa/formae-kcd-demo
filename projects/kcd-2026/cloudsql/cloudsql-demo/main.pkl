@@ -1,109 +1,73 @@
+/*
+ * Cloud SQL Postgres cloudsql-demo. Raw forma: stack, target and resource in
+ * this one file (same shape as `formae extract`), no shared modules.
+ *
+ * One stack per forma folder: a reconcile apply deletes any resource in the
+ * stack that this file does not declare, so don't reuse the stack label.
+ * Labels: stack = <project>/<forma folder>, target = <project>.
+ */
 extends "@formae/forma.pkl"
 import "@formae/formae.pkl"
-
-// Resource imports
-import "@gcp/sql/database.pkl" as database
-import "@gcp/gcp.pkl" as gcp
-
-local class _formaeDesiredConfig_0 {
- `Project`: Any
- `Region`: Any
- `Type`: Any
- @formae.ConfigFieldHint { createOnly = false }
- hidden `Auth`: Any = null
-}
+import "@gcp/gcp.pkl"
+import "@gcp/sql/database.pkl"
 
 forma {
-
- local `kcd2026/cloudsql/cloudsqlDemo` = new formae.Stack {
-  label = "kcd-2026/cloudsql/cloudsql-demo"
-  description = "Cloud SQL cloudsql-demo for kcd-2026"
- }
- `kcd2026/cloudsql/cloudsqlDemo`
-
-
- local kcd2026 = new formae.Target {
-  label = "kcd-2026"
-  namespace = "GCP"
-  reap = new formae.ReapAfter { maxUnreachable = 86400.s }
-  discoverable = true
-  config = new _formaeDesiredConfig_0 {
-   `Project` = "kcd-2026"
-   `Region` = "asia-southeast2"
-   `Type` = "GCP"
+  new formae.Stack {
+    label = "kcd-2026/cloudsql/cloudsql-demo"
+    description = "Cloud SQL cloudsql-demo for kcd-2026"
   }
- }
- kcd2026
 
- new database.DatabaseInstance {
-  label = "cloudsql-demo"
-  project = "kcd-2026"
-  name = "cloudsql-demo"
-  databaseVersion = "POSTGRES_18"
-  region = "asia-southeast2"
-  settings = new database.Settings {
-   tier = "db-f1-micro"
-   availabilityType = "ZONAL"
-   dataDiskSizeGb = 10
-   dataDiskType = "PD_SSD"
-   storageAutoResize = true
-   userLabels = new Mapping {
-    ["component"] = "cloudsql-demo"
-    ["drift-test"] = "kcd"
-    ["environment"] = "stg"
-    ["project"] = "kcd-2026"
-   }
-   ipConfiguration = new database.IpConfiguration {
-    ipv4Enabled = true
-    requireSsl = false
-    authorizedNetworks = new Listing {  }
-    sslMode = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
-    serverCaMode = "GOOGLE_MANAGED_INTERNAL_CA"
-    serverCertificateRotationMode = "SERVER_CERTIFICATE_ROTATION_MODE_UNSPECIFIED"
-   }
-   backupConfiguration = new database.BackupConfiguration {
-    enabled = true
-    pointInTimeRecoveryEnabled = true
-    backupRetentionSettings = new database.BackupRetentionSettings {
-     retainedBackups = 7
-     retentionUnit = "COUNT"
+  new formae.Target {
+    label = "kcd-2026"
+    config = new gcp.Config {
+      project = "kcd-2026"
+      region = "asia-southeast2"
     }
-    startTime = "08:00"
-    kind = "sql#backupConfiguration"
-    backupTier = "STANDARD"
-    transactionLogRetentionDays = 7
-    transactionalLogStorageState = "CLOUD_STORAGE"
-   }
-   maintenanceWindow = new database.MaintenanceWindow {
-    day = 6
-    hour = 18
-    updateTrack = "stable"
-   }
-   databaseFlags = new Listing { new database.DatabaseFlag {
-     name = "max_connections"
-     value = "100"
-    }; new database.DatabaseFlag {
-     name = "cloudsql.iam_authentication"
-     value = "on"
-    } }
-   activationPolicy = "ALWAYS"
-   authorizedGaeApplications = new Listing {  }
-   connectorEnforcement = "NOT_REQUIRED"
-   deletionProtectionEnabled = true
-   edition = "ENTERPRISE"
-   enableDataplexIntegration = true
-   kind = "sql#settings"
-   locationPreference = new Mapping {
-    ["kind"] = "sql#locationPreference"
-    ["zone"] = "asia-southeast2-c"
-   }
-   pricingPlan = "PER_USE"
-   replicationLagMaxSeconds = 31536000
-   replicationType = "SYNCHRONOUS"
-   settingsVersion = "15"
-   storageAutoResizeLimit = "0"
   }
-  target = new formae.TargetResolvable { label = "kcd-2026" }
-  stack = new formae.StackResolvable { label = "kcd-2026/cloudsql/cloudsql-demo" }
- }
+
+  new database.DatabaseInstance {
+    label = "cloudsql-demo"
+    project = "kcd-2026"
+    name = "cloudsql-demo"
+    databaseVersion = "POSTGRES_18"
+    region = "asia-southeast2"
+    settings = new database.Settings {
+      tier = "db-g1-small"
+      availabilityType = "ZONAL"
+      edition = "ENTERPRISE"
+      dataDiskType = "PD_SSD"
+      storageAutoResize = true
+      deletionProtectionEnabled = true
+      userLabels {
+        ["project"] = "kcd-2026"
+        ["component"] = "cloudsql-demo"
+        ["environment"] = "stg"
+      }
+      // Public IP tanpa authorized networks: tidak ada IP luar yang boleh masuk;
+      // akses lewat Cloud SQL Auth Proxy / connector (IAM). Private IP di VPC
+      // `default` kcd-2026 butuh private service access (peering servicenetworking)
+      // yang belum ada; kalau sudah, ganti dengan:
+      //   ipv4Enabled    = false
+      //   privateNetwork = "https://www.googleapis.com/compute/v1/projects/kcd-2026/global/networks/default"
+      ipConfiguration = new database.IpConfiguration {
+        ipv4Enabled = true
+        authorizedNetworks {}
+      }
+      backupConfiguration = new database.BackupConfiguration {
+        enabled = true
+        pointInTimeRecoveryEnabled = true
+        startTime = "08:00"
+        transactionLogRetentionDays = 7
+      }
+      maintenanceWindow = new database.MaintenanceWindow {
+        day = 6
+        hour = 18
+        updateTrack = "stable"
+      }
+      databaseFlags {
+        new { name = "max_connections"; value = "100" }
+        new { name = "cloudsql.iam_authentication"; value = "on" }
+      }
+    }
+  }
 }
