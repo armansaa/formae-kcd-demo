@@ -1,181 +1,223 @@
-/*
- * promo demo app in namespace kcd-demo, GKE gke-research-lab: a ConfigMap read by promo-api,
- * and promo-worker, which loads a ~100Mi cache and is OOMKilled at a 64Mi memory limit.
- * Raw forma: stack, target and resources in this one file (same shape as `formae extract`),
- * no shared modules. Same layout as kube-manifest/mario.
- *
- * One stack per forma folder: a reconcile apply deletes any resource in the stack that this
- * file does not declare, so don't reuse the stack label.
- * Labels: stack = <project>/<forma folder>, target = <project>/<cluster>.
- *
- * Kubernetes defaults (strategy, an empty securityContext, dnsPolicy, ...) are declared on
- * purpose: when reality-sync absorbs a change and writes the stack back, they are already
- * here, so the bot's PR shows only the field that really changed.
- */
 extends "@formae/forma.pkl"
 import "@formae/formae.pkl"
-import "@gcp/container/cluster.pkl" as gkeCluster
-import "@k8s/target.pkl" as k8sTarget
-import "@k8s/v1.35/k8s.pkl" as k8s
-import "@k8s/v1.35/core/Namespace.pkl" as Namespace
-import "@k8s/v1.35/core/ConfigMap.pkl" as ConfigMap
-import "@k8s/v1.35/apps/Deployment.pkl" as Deployment
 
-// k8s plugin 0.1.13/0.1.14 marks containers[].resources hasProviderDefault, and formae strips
-// such a field inside a list from both sides of the diff: resources changes in code would never
-// reach the cluster. These subclasses redeclare the field without that hint; the resource type
-// stays K8S::Apps::Deployment. (Same as kube-manifest/mario.)
-local class Container extends k8s.Container {
-  @formae.FieldHint {}
-  resources: k8s.ResourceRequirements?
+// Resource imports
+import "@k8s/v1.36/apps/Deployment.pkl" as Deployment
+import "@k8s/v1.36/core/ConfigMap.pkl" as ConfigMap
+import "@k8s/v1.36/core/Namespace.pkl" as Namespace
+// Dependency imports
+import "@k8s/shared.pkl" as shared
+import "@k8s/v1.36/k8s.pkl" as k8s
+
+local class _formaeDesiredConfig_0 {
+ `ApiVersion`: Any
+ @formae.ConfigFieldHint { createOnly = true }
+ `Auth`: Any
+ `Type`: Any
+ @formae.ConfigFieldHint { createOnly = false }
+ hidden `KubernetesVersion`: Any = null
 }
-local class PodSpec extends k8s.PodSpec { containers: Listing<Container> }
-local class PodTemplateSpec extends k8s.PodTemplateSpec { spec: PodSpec? }
-local class DeploymentSpec extends Deployment.DeploymentSpec { template: PodTemplateSpec }
-local class PromoDeployment extends Deployment.Deployment { spec: DeploymentSpec? }
-
-// The GKE cluster as found by the agent's discovery (stack `$unmanaged`, label = cluster name).
-// The target takes endpoint and CA from it, so no IP or certificate is written here.
-local cluster = new gkeCluster.ClusterResolvable { label = "gke-research-lab"; stack = "$unmanaged" }
-
-// Objects in namespace kcd-demo reference the Namespace resource, so formae creates it first
-// (and deletes it last).
-local ns = new Namespace.NamespaceResolvable { label = "namespace-kcd-demo"; stack = "kcd-2026/kube-manifest/promo" }
-
-local function labels(app: String) = new Mapping { ["app"] = app; ["managed-by"] = "formae" }
 
 forma {
-  new formae.Stack {
-    label = "kcd-2026/kube-manifest/promo"
-    description = "promo demo app in namespace kcd-demo (GKE gke-research-lab)"
-  }
 
-  // Same target as kube-manifest/mario (one target per cluster, shared by its stacks).
-  new formae.Target {
-    label = "kcd-2026/gke-research-lab"
-    config = new k8sTarget.Config {
-      kubernetesVersion = "1.35"
-      auth = new k8sTarget.GKEAuth {
-        endpoint = cluster.endpoint
-        certificateAuthority = cluster.clusterCaCertificate
-        projectId = "kcd-2026"
-        location = "asia-southeast2-a"
-        clusterName = "gke-research-lab"
-      }
-    }
-  }
+ local `kcd2026/kubeManifest/promo` = new formae.Stack {
+  label = "kcd-2026/kube-manifest/promo"
+  description = "promo demo app in namespace kcd-demo (GKE gke-research-lab)"
+ }
+ `kcd2026/kubeManifest/promo`
 
-  new Namespace.Namespace {
-    label = "namespace-kcd-demo"
-    apiVersion = "v1"
-    kind = "Namespace"
-    metadata { name = "kcd-demo" }
-  }
 
-  new ConfigMap.ConfigMap {
-    label = "promo-config"
-    apiVersion = "v1"
-    kind = "ConfigMap"
-    metadata {
-      name = "promo-config"
-      namespace = ns.name
-      labels = labels("promo-api")
-    }
-    data {
-      ["DISCOUNT_PCT"] = "10"
-      ["PROMO_ENABLED"] = "false"
-    }
+ local `kcd2026/gkeResearchLab` = new formae.Target {
+  label = "kcd-2026/gke-research-lab"
+  namespace = "K8S"
+  reap = new formae.ReapAfter { maxUnreachable = 86400.s }
+  discoverable = true
+  config = new _formaeDesiredConfig_0 {
+   `ApiVersion` = "v1.35"
+   `Auth` = new Mapping {
+    ["CertificateAuthority"] = new formae.Resolvable { label = "gke-research-lab"; type = "GCP::Container::Cluster"; stack = "$unmanaged"; property = "masterAuth.clusterCaCertificate" }
+    ["ClusterName"] = "gke-research-lab"
+    ["Endpoint"] = new formae.Resolvable { label = "gke-research-lab"; type = "GCP::Container::Cluster"; stack = "$unmanaged"; property = "endpoint" }
+    ["Location"] = "asia-southeast2-a"
+    ["ProjectId"] = "kcd-2026"
+    ["Type"] = "GKE"
+   }
+   `Type` = "K8S"
   }
+ }
+ `kcd2026/gkeResearchLab`
 
-  new PromoDeployment {
-    label = "promo-api"
-    apiVersion = "apps/v1"
-    kind = "Deployment"
-    metadata {
-      name = "promo-api"
-      namespace = ns.name
-      labels = labels("promo-api")
+ new Deployment.Deployment {
+  label = "promo-worker"
+  apiVersion = "apps/v1"
+  kind = "Deployment"
+  metadata = new shared.NamespacedObjectMeta {
+   name = "promo-worker"
+   namespace = new formae.Resolvable { label = "namespace-kcd-demo"; type = "K8S::Core::Namespace"; stack = "kcd-2026/kube-manifest/promo"; property = "metadata.name" }
+   labels = new Mapping {
+    ["app"] = "promo-worker"
+    ["managed-by"] = "formae"
+   }
+  }
+  spec = new Deployment.DeploymentSpec {
+   template = new k8s.PodTemplateSpec {
+    metadata = new k8s.PodTemplateMetadata {
+     labels = new Mapping {
+      ["app"] = "promo-worker"
+      ["managed-by"] = "formae"
+     }
     }
-    spec {
-      replicas = 1
-      revisionHistoryLimit = 10
-      progressDeadlineSeconds = 600
-      selector { matchLabels = labels("promo-api") }
-      strategy {
-        type = "RollingUpdate"
-        rollingUpdate { maxSurge = "25%"; maxUnavailable = "25%" }
-      }
-      template {
-        metadata { labels = labels("promo-api") }
-        spec {
-          dnsPolicy = "ClusterFirst"
-          terminationGracePeriodSeconds = 30
-          securityContext {}
-          schedulerName = "default-scheduler"
-          restartPolicy = "Always"
-          containers {
-            new {
-              name = "promo-api"
-              image = "mirror.gcr.io/library/busybox:1.36"
-              terminationMessagePolicy = "File"
-              terminationMessagePath = "/dev/termination-log"
-              resources {
-                requests { ["cpu"] = "10m"; ["memory"] = "16Mi" }
-                limits { ["cpu"] = "50m"; ["memory"] = "64Mi" }
-              }
-              command { "sh"; "-c" }
-              args { "while true; do echo \"PROMO_ENABLED=$PROMO_ENABLED DISCOUNT_PCT=$DISCOUNT_PCT\"; sleep 30; done" }
-              envFrom { new { configMapRef { name = "promo-config" } } }
-            }
-          }
+    spec = new k8s.PodSpec {
+     dnsPolicy = "ClusterFirst"
+     terminationGracePeriodSeconds = 30
+     securityContext = new k8s.PodSecurityContext {
+
+     }
+     schedulerName = "default-scheduler"
+     restartPolicy = "Always"
+     containers = new Listing { new k8s.Container {
+       image = "mirror.gcr.io/library/busybox:1.36"
+       terminationMessagePolicy = "File"
+       terminationMessagePath = "/dev/termination-log"
+       resources = new k8s.ResourceRequirements {
+        requests = new Mapping {
+         ["cpu"] = "10m"
+         ["memory"] = "16Mi"
         }
-      }
-    }
-  }
-
-  new PromoDeployment {
-    label = "promo-worker"
-    apiVersion = "apps/v1"
-    kind = "Deployment"
-    metadata {
-      name = "promo-worker"
-      namespace = ns.name
-      labels = labels("promo-worker")
-    }
-    spec {
-      replicas = 1
-      revisionHistoryLimit = 10
-      progressDeadlineSeconds = 600
-      selector { matchLabels = labels("promo-worker") }
-      strategy {
-        type = "RollingUpdate"
-        rollingUpdate { maxSurge = "25%"; maxUnavailable = "25%" }
-      }
-      template {
-        metadata { labels = labels("promo-worker") }
-        spec {
-          dnsPolicy = "ClusterFirst"
-          terminationGracePeriodSeconds = 30
-          securityContext {}
-          schedulerName = "default-scheduler"
-          restartPolicy = "Always"
-          containers {
-            new {
-              name = "promo-worker"
-              image = "mirror.gcr.io/library/busybox:1.36"
-              terminationMessagePolicy = "File"
-              terminationMessagePath = "/dev/termination-log"
-              // 64Mi is below what the worker needs (~100Mi): it is OOMKilled (exit 137).
-              resources {
-                requests { ["cpu"] = "10m"; ["memory"] = "16Mi" }
-                limits { ["cpu"] = "50m"; ["memory"] = "64Mi" }
-              }
-              command { "sh"; "-c" }
-              args { "echo \"loading promo cache (100Mi)\"; awk 'BEGIN { cache = sprintf(\"%104857600s\", \"\"); print \"promo cache loaded\"; system(\"while true; do echo worker ok; sleep 30; done\") }'" }
-            }
-          }
+        limits = new Mapping {
+         ["cpu"] = "50m"
+         ["memory"] = "256Mi"
         }
-      }
+       }
+       command = new Listing { "sh"; "-c" }
+       args = new Listing { "echo \"loading promo cache (100Mi)\"; awk 'BEGIN { cache = sprintf(\"%104857600s\", \"\"); print \"promo cache loaded\"; system(\"while true; do echo worker ok; sleep 30; done\") }'" }
+       name = "promo-worker"
+      } }
     }
+   }
+   replicas = 1
+   revisionHistoryLimit = 10
+   selector = new k8s.LabelSelector {
+    matchLabels = new Mapping {
+     ["app"] = "promo-worker"
+     ["managed-by"] = "formae"
+    }
+   }
+   strategy = new Deployment.DeploymentStrategy {
+    type = "RollingUpdate"
+    rollingUpdate = new Deployment.RollingUpdateDeployment {
+     maxSurge = "25%"
+     maxUnavailable = "25%"
+    }
+   }
+   progressDeadlineSeconds = 600
   }
+  target = new formae.TargetResolvable { label = "kcd-2026/gke-research-lab" }
+  stack = new formae.StackResolvable { label = "kcd-2026/kube-manifest/promo" }
+ }
+
+ new ConfigMap.ConfigMap {
+  label = "promo-config"
+  apiVersion = "v1"
+  kind = "ConfigMap"
+  metadata = new shared.NamespacedObjectMeta {
+   name = "promo-config"
+   namespace = new formae.Resolvable { label = "namespace-kcd-demo"; type = "K8S::Core::Namespace"; stack = "kcd-2026/kube-manifest/promo"; property = "metadata.name" }
+   labels = new Mapping {
+    ["app"] = "promo-api"
+    ["managed-by"] = "formae"
+   }
+  }
+  data = new Mapping {
+   ["DISCOUNT_PCT"] = "10"
+   ["PROMO_ENABLED"] = "false"
+  }
+  target = new formae.TargetResolvable { label = "kcd-2026/gke-research-lab" }
+  stack = new formae.StackResolvable { label = "kcd-2026/kube-manifest/promo" }
+ }
+
+ new Namespace.Namespace {
+  label = "namespace-kcd-demo"
+  apiVersion = "v1"
+  kind = "Namespace"
+  metadata = new Namespace.NamespaceMetadata {
+   name = "kcd-demo"
+  }
+  target = new formae.TargetResolvable { label = "kcd-2026/gke-research-lab" }
+  stack = new formae.StackResolvable { label = "kcd-2026/kube-manifest/promo" }
+ }
+
+ new Deployment.Deployment {
+  label = "promo-api"
+  apiVersion = "apps/v1"
+  kind = "Deployment"
+  metadata = new shared.NamespacedObjectMeta {
+   name = "promo-api"
+   namespace = new formae.Resolvable { label = "namespace-kcd-demo"; type = "K8S::Core::Namespace"; stack = "kcd-2026/kube-manifest/promo"; property = "metadata.name" }
+   labels = new Mapping {
+    ["app"] = "promo-api"
+    ["managed-by"] = "formae"
+   }
+  }
+  spec = new Deployment.DeploymentSpec {
+   template = new k8s.PodTemplateSpec {
+    metadata = new k8s.PodTemplateMetadata {
+     labels = new Mapping {
+      ["app"] = "promo-api"
+      ["managed-by"] = "formae"
+     }
+    }
+    spec = new k8s.PodSpec {
+     dnsPolicy = "ClusterFirst"
+     terminationGracePeriodSeconds = 30
+     securityContext = new k8s.PodSecurityContext {
+
+     }
+     schedulerName = "default-scheduler"
+     restartPolicy = "Always"
+     containers = new Listing { new k8s.Container {
+       image = "mirror.gcr.io/library/busybox:1.36"
+       terminationMessagePolicy = "File"
+       terminationMessagePath = "/dev/termination-log"
+       resources = new k8s.ResourceRequirements {
+        requests = new Mapping {
+         ["cpu"] = "10m"
+         ["memory"] = "16Mi"
+        }
+        limits = new Mapping {
+         ["cpu"] = "50m"
+         ["memory"] = "64Mi"
+        }
+       }
+       command = new Listing { "sh"; "-c" }
+       args = new Listing { "while true; do echo \"PROMO_ENABLED=$PROMO_ENABLED DISCOUNT_PCT=$DISCOUNT_PCT\"; sleep 30; done" }
+       name = "promo-api"
+       envFrom = new Listing { new k8s.EnvFromSource {
+         configMapRef = new k8s.ConfigMapEnvSource {
+          name = "promo-config"
+         }
+        } }
+      } }
+    }
+   }
+   replicas = 1
+   revisionHistoryLimit = 10
+   selector = new k8s.LabelSelector {
+    matchLabels = new Mapping {
+     ["app"] = "promo-api"
+     ["managed-by"] = "formae"
+    }
+   }
+   strategy = new Deployment.DeploymentStrategy {
+    type = "RollingUpdate"
+    rollingUpdate = new Deployment.RollingUpdateDeployment {
+     maxSurge = "25%"
+     maxUnavailable = "25%"
+    }
+   }
+   progressDeadlineSeconds = 600
+  }
+  target = new formae.TargetResolvable { label = "kcd-2026/gke-research-lab" }
+  stack = new formae.StackResolvable { label = "kcd-2026/kube-manifest/promo" }
+ }
 }
