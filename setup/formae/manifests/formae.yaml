@@ -13,6 +13,7 @@ metadata:
   annotations:
     iam.gke.io/gcp-service-account: formae-agent@kcd-2026.iam.gserviceaccount.com
 automountServiceAccountToken: true
+
 ---
 # Source: formae/templates/configmap.yaml
 apiVersion: v1
@@ -58,6 +59,10 @@ data:
           "GCP::Container::Cluster"
           "GCP::SQL::DatabaseInstance"
           "GCP::Storage::Bucket"
+          "K8S::Core::Namespace"
+          "K8S::Core::ConfigMap"
+          "K8S::Apps::Deployment"
+          "K8S::Batch::CronJob"
         }
       }
 
@@ -81,6 +86,7 @@ data:
       disableUsageReporting = true
     }
     pluginDir = "/opt/pel/formae/plugins"
+
 ---
 # Source: formae/templates/pvc.yaml
 apiVersion: v1
@@ -99,6 +105,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
+
 ---
 # Source: formae/templates/service.yaml
 apiVersion: v1
@@ -126,6 +133,7 @@ spec:
     ## pod, which carries the same name/instance labels — half the API traffic
     ## would be routed to PostgreSQL.
     app.kubernetes.io/component: agent
+
 ---
 # Source: formae/templates/deployment.yaml
 apiVersion: apps/v1
@@ -147,7 +155,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/config: 63202fc17470bc093c07ac6e2b79b6447e5d77df646c75fea4d2a513ead7f15d
+        checksum/config: ccba801c75f16f7f2f56f2e1e5c0fd82b4ea452d4e14ef9b4898058d2cacacf3
       labels:
         helm.sh/chart: formae-0.88.1
         app.kubernetes.io/name: formae

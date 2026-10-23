@@ -25,9 +25,8 @@ formae:
     sqlite:
       filePath: /data/formae.db
 
-  # Resources are always created from IaC first; the agent only keeps the
-  # stacks it manages in sync with reality (synchronization, on by default).
-  # No discovery of unmanaged resources.
+  # The agent keeps the stacks it manages in sync with reality
+  # (synchronization, on by default) and discovers what no forma declares.
   discovery:
     # Every 30 minutes (and on demand: POST /api/v1/admin/discover, used by
     # `formae import`), read-only: lists these types on every discoverable
@@ -37,12 +36,18 @@ formae:
     #     A project's clusters are found once a GCP target for that project is
     #     registered (any applied GCP forma, e.g. a bucket).
     #   - Cloud SQL / buckets: so `formae import` can adopt existing ones.
+    #   - Kubernetes objects on discoverable k8s targets: anything created with
+    #     kubectl (e.g. a hand-made CronJob) shows up as managed:false.
     enabled: true
     interval: 30.min
     resourceTypesToDiscover:
       - GCP::Container::Cluster
       - GCP::SQL::DatabaseInstance
       - GCP::Storage::Bucket
+      - K8S::Core::Namespace
+      - K8S::Core::ConfigMap
+      - K8S::Apps::Deployment
+      - K8S::Batch::CronJob
 
   # The ClusterIP is reachable from every pod in the cluster (incl. shared
   # GitHub runners), so require auth. Secret formae-auth is created with kubectl (setup/formae/README.md).
